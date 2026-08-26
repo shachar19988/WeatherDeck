@@ -4,17 +4,44 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 
 ## Features
 
-- ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection
-- Side-by-side model comparison with a measured agreement score
+- One table per day: pick a day and a model, and every three-hourly reading for
+  that day — air and sea together — is on a single screen
+- ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
+  option that averages them with the hourly spread and contributing model count
+- A wind graph for the selected day at full hourly resolution, with the gust
+  envelope and your alert threshold marked
+- Model comparison in place: one wind row per model, toggled on the same table
+- Wind carries a colour scale, hours after dark are shaded, and each day chip
+  shows that day's temperature range and strongest wind
 - 21-day rolling forecast
 - NOAA GEFS 31-member ensemble mean for the extended range
 - Forecast-confidence labels and ensemble spread for temperature and wind
 - Wind, gusts, temperature, pressure, precipitation, cloud cover and CAPE
-- Marine wave, swell and current guidance
+- Wave, swell, wind wave, current and sea level as rows of that same table
 - Location search, GPS location and on-device saved spots
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
 - Automatic refresh every 30 minutes, on regaining connectivity, and on focus (throttled)
+
+## Home-screen widget
+
+A 4x4 Android widget shows today's temperature, wave and wind ranges over a
+scene that follows the current conditions.
+
+Home-screen widgets run on `RemoteViews`, which has no property animators and no
+animated drawables, so continuous animation is not available. `ViewFlipper` is
+available, and the system cycles its children on its own: the widget renders
+three frames of the same scene with clouds, rain and swell advanced a step, and
+the flipper plays them. The readings sit above the scene as real `TextView`s, so
+they stay sharp and cost nothing to redraw.
+
+The widget cannot read the interface's data — that lives in the WebView's
+localStorage, which native code has no access to — so it fetches its own small
+slice of Open-Meteo on a background thread held open by `goAsync()`, with no
+scheduling library. The app mirrors the chosen location into `SharedPreferences`
+with a plain `evaluateJavascript` read; no JavaScript interface is installed, so
+the embedded map frame has nothing to reach for. Ranges that cannot be read
+render as a dash, like everywhere else.
 
 ## Forecast strategy
 
@@ -27,6 +54,42 @@ roughly 7.5 days even though its time axis spans 16.
 For dates the operational model does not cover, the app switches to the NOAA GEFS
 0.5-degree ensemble mean and labels the source accordingly. As a date moves into
 operational range, the higher-resolution forecast takes over again.
+
+### Reading it at a glance
+
+Wind is the one variable with a colour scale — a single blue ramp, dark-anchored
+so calm air recedes into the panel and a gale reads brightest. Lightness is
+monotone across the ramp, adjacent steps differ by dL >= 0.09, and each band's
+ink clears 4.5:1 against its own fill. Every cell still prints its number, so
+colour is never the only channel. One scale doing one job beats colouring every
+row.
+
+Columns after dark are shaded and marked, so a run of night hours reads as a
+night instead of being worked out from the clock. Day chips carry that day's
+temperature range and strongest wind, which is usually enough to decide whether
+a day is worth opening at all.
+
+### One table
+
+Everything for the selected day lives in a single three-hourly table, grouped
+into AIR, MODEL AGREEMENT (for the mean) and SEA. The wave models run on their
+own ten-day axis, so their series are remapped onto the weather axis by
+timestamp rather than by array position, and the sea rows simply drop out past
+their range. Rows are kept or dropped based on the hours actually on screen, so
+a variable a model stops publishing part-way through the range disappears for
+that day instead of rendering a line of dashes.
+
+Sea conditions do not depend on the selected weather model — the wave model is
+the same whichever one is chosen — and the table says so.
+
+### The model mean
+
+The MEAN tab averages the operational models hour by hour. Only the models that
+publish a value at a given hour contribute, so the mean narrows on its own as
+the shorter-range models drop out — the table shows how many models went into
+each column and how far apart they were, because a mean of one model is not a
+consensus. Wind direction is averaged as a unit vector: the arithmetic mean of
+350° and 10° is 180°, which points the opposite way.
 
 Models also differ in *which* variables they publish — ECMWF AIFS provides no
 gusts, no CAPE and no precipitation probability. Rows and cards for variables a

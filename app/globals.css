@@ -20,3 +20,28 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 .sheet-dismiss{position:absolute;inset:0;width:100%;border:0;padding:0;background:transparent;cursor:default}
 .sheet{position:relative;z-index:1}
+.agreement{display:inline-block;padding:4px 7px;border-radius:6px;font-size:11px;font-weight:800}
+.agreement.good{background:#123029;color:var(--accent)}
+.agreement.fair{background:#332c14;color:#e2d271}
+.agreement.poor{background:#3a2119;color:#ff9c85}
+.table-group{grid-column:1/-1;padding:12px 0 6px;border-bottom:1px solid var(--line)}
+.table-group span{position:sticky;left:7px;font-size:8px;font-weight:900;letter-spacing:.16em;color:var(--accent)}
+.scale-chip{display:block;padding:6px 3px;border-radius:6px;font-weight:800;font-size:12px;line-height:1.1}
+.table-cell.night{background:#0a1c25}
+.table-head.night{background:#0a1c25;color:#6d8590}
+.table-head em{display:block;font-style:normal;font-size:9px;margin-top:2px;opacity:.75}
+.section-actions{display:flex;align-items:center;gap:8px}
+.table-toggle{border:1px solid var(--line);background:#0e252e;color:var(--muted);padding:7px 11px;border-radius:99px;font-size:9px;font-weight:800;letter-spacing:.06em}
+.table-toggle.on{background:var(--accent);border-color:var(--accent);color:#062018}
+.days-strip i{display:block;font-style:normal;font-size:10px;font-weight:700;margin-top:4px;color:#c4d4d9}
+.days-strip .active i{color:#062018}
+.days-strip em{color:inherit;opacity:.7}
+.days-strip button{min-width:74px}
+.graph-card{background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:17px 16px 10px;margin-bottom:11px}
+.graph-legend{display:flex;gap:12px}
+.graph-legend span{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--muted);font-weight:700}
+.graph-legend i{width:9px;height:9px;border-radius:3px}
+.graph-frame{position:relative;margin-top:12px}
+.graph-frame svg{display:block;width:100%;height:auto;touch-action:pan-y}
+.graph-tooltip{position:absolute;top:0;right:0;margin:0;padding:6px 9px;background:#0a1c24ee;border:1px solid var(--line);border-radius:8px;font-size:10px;color:#d8e4e7;pointer-events:none}
+.graph-tooltip b{color:var(--accent);margin-right:4px}
