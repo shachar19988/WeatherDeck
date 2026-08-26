@@ -8,6 +8,8 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
   that day — air and sea together — is on a single screen
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
   option that averages them with the hourly spread and contributing model count
+- A wind graph for the selected day at full hourly resolution, with the gust
+  envelope and your alert threshold marked
 - Model comparison in place: one wind row per model, toggled on the same table
 - Wind carries a colour scale, hours after dark are shaded, and each day chip
   shows that day's temperature range and strongest wind

@@ -45,6 +45,11 @@ const MODEL_ROW_PREFIX = 'model:';
  * Checked: lightness is monotone across the ramp, every  adjacent step differs by
  * dL >= 0.09, and each band's ink clears 4.5:1 against its own fill.
  */
+// Two series, validated against the panel surface in dark mode: lightness band,
+// chroma floor, CVD separation, normal-vision floor and contrast all pass.
+const SERIES_WIND = '#3987e5';
+const SERIES_GUST = '#d95926';
+
 const WIND_SCALE = [
   { limit: 5, fill: '#0d366b', ink: '#edf6f7' },
   { limit: 10, fill: '#184f95', ink: '#edf6f7' },
@@ -701,6 +706,8 @@ export default function WeatherApp() {
           <small>{sourceDetail}</small>
         </section>
 
+        <WindGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
+
         <ReadingTable
           data={tableData}
           indexes={forecastIndexes}
@@ -869,6 +876,145 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   unit: MODEL_META[model].provider,
   render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
 }));
+
+const GRAPH = { width: 320, height: 128, left: 28, right: 8, top: 12, bottom: 20 };
+
+/**
+ * Wind over the whole selected day at full hourly resolution — the shape the
+ * three-hourly table cannot show: when the wind fills in, how long it holds and
+ * when it dies. Sustained wind is the filled band; gusts are the envelope above
+ * it. The table below is the accessible equivalent of this chart.
+ */
+function WindGraph({ data, indexes, nowIndex, threshold }: {
+  data: Forecast | null;
+  indexes: number[];
+  nowIndex: number;
+  threshold: number;
+}) {
+  const [hover, setHover] = useState<number | null>(null);
+
+  const points = indexes
+    .map(index => ({
+      index,
+      time: data?.hourly?.time?.[index],
+      wind: reading(data, 'wind_speed_10m', index),
+      gust: reading(data, 'wind_gusts_10m', index),
+      night: reading(data, 'is_day', index) === 0,
+    }))
+    .filter(point => point.wind !== null);
+  if (points.length < 2) return null;
+
+  const peak = Math.max(...points.map(point => Math.max(point.wind ?? 0, point.gust ?? 0)), threshold);
+  const ceiling = Math.max(10, Math.ceil(peak / 5) * 5);
+  const plotWidth = GRAPH.width - GRAPH.left - GRAPH.right;
+  const plotHeight = GRAPH.height - GRAPH.top - GRAPH.bottom;
+  const x = (position: number) => GRAPH.left + (points.length === 1 ? plotWidth / 2 : (position / (points.length - 1)) * plotWidth);
+  const y = (value: number) => GRAPH.top + plotHeight - (value / ceiling) * plotHeight;
+
+  const line = (pick: (point: typeof points[number]) => number | null) => points
+    .map((point, position) => {
+      const value = pick(point);
+      return value === null ? null : `${position === 0 ? 'M' : 'L'}${x(position).toFixed(1)},${y(value).toFixed(1)}`;
+    })
+    .filter(Boolean)
+    .join(' ');
+  const windArea = `${line(point => point.wind)} L${x(points.length - 1).toFixed(1)},${y(0).toFixed(1)} L${x(0).toFixed(1)},${y(0).toFixed(1)} Z`;
+
+  const strongest = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
+  const strongestAt = points.indexOf(strongest);
+  const strongestGust = Math.max(...points.map(point => point.gust ?? 0));
+  // Nudge the peak label clear of the alert line when they land on each other.
+  const peakLabelY = strongest.wind === null
+    ? 0
+    : y(strongest.wind) - (Math.abs(y(strongest.wind) - y(threshold)) < 11 ? 14 : 6);
+  const gridlines = [0, ceiling / 2, ceiling];
+  const active = hover === null ? null : points[hover];
+
+  const onPointer = (event: React.PointerEvent<SVGSVGElement>) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const ratio = ((event.clientX - box.left) / box.width) * GRAPH.width;
+    const position = Math.round(((ratio - GRAPH.left) / plotWidth) * (points.length - 1));
+    setHover(Math.max(0, Math.min(points.length - 1, position)));
+  };
+
+  return (
+    <section className="graph-card">
+      <div className="section-title">
+        <div>
+          <p className="eyebrow">WIND THROUGH THE DAY</p>
+          <h2>{fixed(strongest.wind, 0)} kt{strongestGust > 0 ? ` · gusts ${strongestGust.toFixed(0)}` : ''}</h2>
+        </div>
+        <div className="graph-legend">
+          <span><i style={{ background: SERIES_WIND }} />Wind</span>
+          <span><i style={{ background: SERIES_GUST }} />Gusts</span>
+        </div>
+      </div>
+      <div className="graph-frame">
+        <svg
+          viewBox={`0 0 ${GRAPH.width} ${GRAPH.height}`}
+          role="img"
+          aria-label={`Wind through the day, peaking at ${fixed(strongest.wind, 0)} knots with gusts to ${strongestGust.toFixed(0)}. The table below carries the same readings.`}
+          onPointerMove={onPointer}
+          onPointerLeave={() => setHover(null)}
+        >
+          {points.map((point, position) => point.night && (
+            <rect
+              key={point.index}
+              x={position === 0 ? GRAPH.left : (x(position) + x(position - 1)) / 2}
+              y={GRAPH.top}
+              width={Math.max(1, plotWidth / (points.length - 1))}
+              height={plotHeight}
+              fill="#0a1c25"
+            />
+          ))}
+          {gridlines.map(value => (
+            <g key={value}>
+              <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(value)} y2={y(value)} stroke="#24414d" strokeWidth="1" />
+              <text x={GRAPH.left - 5} y={y(value) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{Math.round(value)}</text>
+            </g>
+          ))}
+          <line
+            x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(threshold)} y2={y(threshold)}
+            stroke="#89a0aa" strokeWidth="1" strokeDasharray="3 3"
+          />
+          <text x={GRAPH.width - GRAPH.right} y={y(threshold) - 3} textAnchor="end" fill="#89a0aa" fontSize="7">alert {threshold}</text>
+
+          <path d={windArea} fill={SERIES_WIND} fillOpacity="0.22" />
+          <path d={line(point => point.gust)} fill="none" stroke={SERIES_GUST} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={line(point => point.wind)} fill="none" stroke={SERIES_WIND} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+
+          {points.map((point, position) => (position % 6 === 0 || position === points.length - 1) && (
+            <text key={point.index} x={x(position)} y={GRAPH.height - 6} textAnchor="middle" fill="#89a0aa" fontSize="7">
+              {formatHour(point.time)}
+            </text>
+          ))}
+          {strongest.wind !== null && (
+            <text x={x(strongestAt)} y={peakLabelY} textAnchor="middle" fill="#edf6f7" fontSize="8" fontWeight="700">
+              {strongest.wind.toFixed(0)}
+            </text>
+          )}
+          {indexes.includes(nowIndex) && (
+            <line
+              x1={x(points.findIndex(point => point.index === nowIndex))}
+              x2={x(points.findIndex(point => point.index === nowIndex))}
+              y1={GRAPH.top} y2={GRAPH.top + plotHeight}
+              stroke="#38e3b1" strokeWidth="1"
+            />
+          )}
+          {active && (
+            <line x1={x(hover ?? 0)} x2={x(hover ?? 0)} y1={GRAPH.top} y2={GRAPH.top + plotHeight} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.5" />
+          )}
+        </svg>
+        {active && (
+          <p className="graph-tooltip">
+            <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt
+            {active.gust !== null && <> · gusts {active.gust.toFixed(1)}</>}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
 
 // The column count travels to the grid as a custom property rather than a full
 // grid-template-columns value, so the responsive rules in the stylesheet still
