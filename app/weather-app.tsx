@@ -72,6 +72,24 @@ function windTone(value: number) {
   return WIND_SCALE.find(band => value < band.limit) ?? WIND_SCALE[WIND_SCALE.length - 1];
 }
 
+/**
+ * Temperature reads cool to warm. It never enters the wind ramp's green, and it
+ * is a different row, so the two scales do not compete. Every band's ink was
+ * checked against its own fill; worst case 5.20:1.
+ */
+const TEMP_SCALE = [
+  { limit: 8, fill: '#2a6fb0', ink: '#ffffff' },
+  { limit: 14, fill: '#3f93b8', ink: '#12100a' },
+  { limit: 19, fill: '#4aa596', ink: '#12100a' },
+  { limit: 24, fill: '#c9a72e', ink: '#12100a' },
+  { limit: 29, fill: '#e08a2c', ink: '#12100a' },
+  { limit: 34, fill: '#dd5f28', ink: '#12100a' },
+  { limit: Infinity, fill: '#c8332a', ink: '#ffffff' },
+];
+function tempTone(value: number) {
+  return TEMP_SCALE.find(band => value < band.limit) ?? TEMP_SCALE[TEMP_SCALE.length - 1];
+}
+
 const CACHE_PREFIX = 'weatherdeck:cache:';
 const FAVORITES_KEY = 'weatherdeck:favorites';
 const WIND_ALERT_KEY = 'weatherdeck:wind-alert';
@@ -945,10 +963,12 @@ function numberCell(data: Forecast | null, key: string, index: number, format: (
   const value = reading(data, key, index);
   return value === null ? EMPTY_CELL : format(value);
 }
+// The fill runs edge to edge rather than sitting in a chip, so a wind row reads
+// as one continuous band of colour instead of a line of separate swatches.
 function windCell(data: Forecast | null, key: string, index: number) {
   return numberCell(data, key, index, value => {
     const tone = windTone(value);
-    return <span className="scale-chip" style={{ background: tone.fill, color: tone.ink }}>{value.toFixed(1)}</span>;
+    return <span className="scale-fill" style={{ background: tone.fill, color: tone.ink }}>{value.toFixed(1)}</span>;
   });
 }
 function arrowCell(data: Forecast | null, key: string, index: number) {
@@ -1000,9 +1020,38 @@ const WEATHER_ROWS: Row[] = [
   },
   { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
   { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
-  { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', tier: 'normal', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
+  {
+    key: 'temperature_2m',
+    group: 'AIR',
+    label: 'Temperature',
+    unit: '°C',
+    tier: 'normal',
+    render: (data, index) => numberCell(data, 'temperature_2m', index, value => {
+      const tone = tempTone(value);
+      return <span className="scale-fill" style={{ background: tone.fill, color: tone.ink }}>{Math.round(value)}°</span>;
+    }),
+  },
   { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', tier: 'reference', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
-  { key: 'precipitation', group: 'AIR', label: 'Rain', unit: 'mm', tier: 'normal', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
+  {
+    key: 'precipitation',
+    group: 'AIR',
+    label: 'Rain',
+    unit: 'mm',
+    tier: 'normal',
+    /*
+     * Eight cells reading "0.0" is not information, it is filler that the eye
+     * skips — which is why this row may as well not have been here on a dry day.
+     * A dry hour is now an empty drop and nothing else; a wet one fills in and
+     * states the amount, with the tint scaled to how much.
+     */
+    render: (data, index) => numberCell(data, 'precipitation', index, value => (value < 0.05
+      ? <span className="rain-cell dry" aria-label="no rain">◌</span>
+      : (
+        <span className="rain-cell wet" style={{ '--wet': `${Math.min(100, value * 45).toFixed(0)}%` } as CSSProperties}>
+          <b>{value.toFixed(1)}</b>
+        </span>
+      ))),
+  },
   { key: 'cloud_cover', group: 'AIR', label: 'Clouds', unit: '%', tier: 'reference', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
 ];
 
@@ -1176,7 +1225,10 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
       <div className="section-title">
         <div>
           <p className="eyebrow">THROUGH THE DAY</p>
-          <h2>{fixed(peakWind.wind, 0)} kt{hasWave ? ` · ${peakWave.toFixed(1)} m${typicalPeriod ? ` @ ${typicalPeriod.toFixed(0)} s` : ''}` : ''}</h2>
+          <h2>Wind to {fixed(peakWind.wind, 0)} kt</h2>
+          {hasWave && (
+            <p className="graph-sub">Sea {peakWave.toFixed(1)} m{typicalPeriod ? ` at ${typicalPeriod.toFixed(0)} s` : ''}</p>
+          )}
         </div>
         <div className="graph-legend">
           <span className="ramp-legend">
@@ -1301,18 +1353,19 @@ function ReadingTable({ data, indexes, dayIndexes, nowIndex, rows: candidates, b
       </div>
       {rows.length && indexes.length ? (
         <div className="weather-table" style={{ '--cols': indexes.length } as CSSProperties}>
-          <div className="table-head table-label"><b>LOCAL TIME</b></div>
-          {indexes.map(index => (
-            <div className={`table-head${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
-              {formatHour(data?.hourly?.time?.[index])}
-              {night.has(index) && <em aria-label="after dark">☾</em>}
-            </div>
-          ))}
           {rows.map((row, position) => (
             <Fragment key={row.key}>
-              {row.group !== rows[position - 1]?.group && (
-                <div className="table-group"><span>{row.group}</span></div>
-              )}
+              {/* Each group restates the clock. Scrolled down past a single
+                  header, a column of numbers stops saying which hour it is. */}
+              {row.group !== rows[position - 1]?.group && <>
+                <div className="table-head table-label"><b>{row.group}</b></div>
+                {indexes.map(index => (
+                  <div className={`table-head${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
+                    {formatHour(data?.hourly?.time?.[index])}
+                    {night.has(index) && <em aria-label="after dark">☾</em>}
+                  </div>
+                ))}
+              </>}
               <div className="table-row">
                 <div className={`table-label ${row.tier}`}>
                 <span className="label-text"><b>{row.label}</b><small>{row.unit}</small></span>

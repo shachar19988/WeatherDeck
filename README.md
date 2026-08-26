@@ -111,6 +111,14 @@ to land. Three things fix that without hiding a single number:
   part of a table; the shape answers it before the numbers are read at all.
 - **The current hour is marked**, so "where am I" needs no arithmetic against the
   clock.
+- **Every group restates the clock.** Scrolled down past a single header row, a
+  column of numbers stops saying which hour it is, so each group header carries
+  the hours again.
+- **Wind and temperature fill their cells** edge to edge rather than sitting in a
+  chip, so a row reads as one continuous band instead of a line of swatches.
+- **A dry hour is an empty drop.** Eight cells reading "0.0" is filler the eye
+  skips — which is why the rain row may as well not have been there on a dry day.
+  A wet hour fills in, states the amount, and tints in proportion to it.
 
 ### Offshore wind
 
