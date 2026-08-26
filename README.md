@@ -8,8 +8,9 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
   that day — air and sea together — is on a single screen
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
   option that averages them with the hourly spread and contributing model count
-- A wind graph for the selected day at full hourly resolution, with the gust
-  envelope and your alert threshold marked
+- Wind and waves graphed for the selected day at full hourly resolution, as two
+  plots sharing one time axis
+- A quiet offshore-wind warning, worked out for any coastline in the world
 - Model comparison in place: one wind row per model, toggled on the same table
 - Wind carries a colour scale, hours after dark are shaded, and each day chip
   shows that day's temperature range and strongest wind
@@ -17,7 +18,8 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 - NOAA GEFS 31-member ensemble mean for the extended range
 - Forecast-confidence labels and ensemble spread for temperature and wind
 - Wind, gusts, temperature, pressure, precipitation, cloud cover and CAPE
-- Wave, swell, wind wave, current and sea level as rows of that same table
+- Wave, swell, wind wave, water temperature, current and sea level as rows of
+  that same table
 - Location search, GPS location and on-device saved spots
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
@@ -25,23 +27,32 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 
 ## Home-screen widget
 
-A 4x4 Android widget shows today's temperature, wave and wind ranges over a
-scene that follows the current conditions.
+A 2x2 Android widget shows today's temperature, wind and wave ranges over a
+scene coloured by how much wind the day holds.
 
-Home-screen widgets run on `RemoteViews`, which has no property animators and no
-animated drawables, so continuous animation is not available. `ViewFlipper` is
-available, and the system cycles its children on its own: the widget renders
-three frames of the same scene with clouds, rain and swell advanced a step, and
-the flipper plays them. The readings sit above the scene as real `TextView`s, so
-they stay sharp and cost nothing to redraw.
+It is deliberately static. A widget that animates has to be redrawn to move, and
+paying battery for motion nobody is watching is a bad trade — the colour does the
+work instead. The palette follows the same wind bands as the forecast table, so
+the widget answers "can I go out today" before any number is read.
+
+The scene is drawn on a `Canvas` at the widget's real pixel size, read from
+`getAppWidgetOptions()` and multiplied by the display density, in `ARGB_8888`.
+`RGB_565` would halve the memory, but a smooth radial gradient in five and six
+bits per channel bands visibly. The readings sit above the scene as real
+`TextView`s, so they stay sharp and cost nothing to redraw.
 
 The widget cannot read the interface's data — that lives in the WebView's
 localStorage, which native code has no access to — so it fetches its own small
 slice of Open-Meteo on a background thread held open by `goAsync()`, with no
-scheduling library. The app mirrors the chosen location into `SharedPreferences`
-with a plain `evaluateJavascript` read; no JavaScript interface is installed, so
-the embedded map frame has nothing to reach for. Ranges that cannot be read
-render as a dash, like everywhere else.
+scheduling library. The system refreshes it three-hourly without waking the
+device, and the app pushes one every time it is closed if what the widget holds
+has gone stale. The app mirrors the chosen location into `SharedPreferences` with
+a plain `evaluateJavascript` read; no JavaScript interface is installed, so the
+embedded map frame has nothing to reach for.
+
+Every reading defaults to a dash in the layout itself and every failure path is
+caught and logged, so the widget can never render as blank space with nothing to
+say about why.
 
 ## Forecast strategy
 
@@ -57,12 +68,29 @@ operational range, the higher-resolution forecast takes over again.
 
 ### Reading it at a glance
 
-Wind is the one variable with a colour scale — a single blue ramp, dark-anchored
-so calm air recedes into the panel and a gale reads brightest. Lightness is
-monotone across the ramp, adjacent steps differ by dL >= 0.09, and each band's
-ink clears 4.5:1 against its own fill. Every cell still prints its number, so
-colour is never the only channel. One scale doing one job beats colouring every
-row.
+Wind is the one variable with a colour scale, green through amber to red. It is
+a severity scale rather than a plain magnitude one: on a board or at a helm, 8 kt
+and 28 kt are not two amounts of the same thing, they are two different days.
+Every band's ink was checked against its own fill rather than picked by eye —
+worst case 4.86:1, which matters on a phone in direct sun. Every cell still
+prints its number, so colour is never the only channel, and one scale doing one
+job beats colouring every row.
+
+### Offshore wind
+
+Wind blowing from the shore out to sea is the case that carries a paddler out
+faster than they can come back, and it needs no configuration to detect. On a new
+spot the app asks Open-Meteo's elevation endpoint about a ring of points around
+it — sixteen bearings at five and twelve kilometres — and reads sea as zero. The
+answer is kept as a sixteen-sector water mask rather than one average bearing,
+because on a bay the water wraps around and an average flattens exactly the
+detail that matters. The marine endpoint is no good for this: it snaps to a
+coarse grid and answers for inland points near the coast.
+
+A warning appears only when the wind arrives over land and leaves over water, and
+only when a neighbouring sector agrees, so a wind sitting on a sector boundary
+cannot flip it on and off between runs. It is a dot under the direction arrow and
+one line under the table; on an ordinary day nothing changes.
 
 Columns after dark are shaded and marked, so a run of night hours reads as a
 night instead of being worked out from the clock. Day chips carry that day's

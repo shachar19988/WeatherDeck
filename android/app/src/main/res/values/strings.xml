@@ -1,7 +1,6 @@
 <resources>
-    <string name="widget_description">Today\'s temperature, wave and wind ranges.</string>
-    <string name="widget_scene_description">Animated sky matching the current conditions</string>
-    <string name="widget_temperature_label">TEMPERATURE TODAY</string>
-    <string name="widget_wind_label">WIND</string>
-    <string name="widget_wave_label">WAVES</string>
+    <string name="widget_description">Today\'s temperature, wind and wave ranges.</string>
+    <string name="widget_scene_description">Sky coloured by how much wind the day holds</string>
+    <string name="widget_placeholder">—</string>
+    <string name="widget_no_reading">No reading yet — tap to open</string>
 </resources>

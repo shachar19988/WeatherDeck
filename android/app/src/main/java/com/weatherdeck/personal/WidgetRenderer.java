@@ -2,177 +2,146 @@ package com.weatherdeck.personal;
 
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
-import android.graphics.LinearGradient;
+import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.RadialGradient;
 import android.graphics.Shader;
 
 /**
- * Draws the widget's background scene.
+ * Draws the widget's scene: a saturated field with one soft orb and a low swell,
+ * coloured by how much wind the day holds.
  *
- * Home-screen widgets run on RemoteViews, which has no property animators and no
- * animated drawables — continuous animation is not available. What is available
- * is ViewFlipper, which the system cycles through a handful of child views on its
- * own. So the motion here is a short loop: each frame is the same scene with its
- * clouds, rain and swell advanced by one step, and the flipper plays them.
+ * The colour carries the information. Two days with the same sky but 6 kt and
+ * 32 kt of wind are not the same day, so the palette follows the wind bands the
+ * forecast table already uses — green through amber to red — and the widget
+ * answers "can I go out today" before any number is read.
  *
- * RGB_565 at this size keeps all three frames well inside the RemoteViews
- * transaction limit; the readings themselves are real TextViews on top, so they
- * stay sharp and cost nothing to redraw.
+ * Drawn at the widget's real pixel size in ARGB_8888. RGB_565 would halve the
+ * memory but a smooth radial gradient in five and six bits per channel bands
+ * visibly, which is exactly the cheap look this design cannot afford.
  */
 final class WidgetRenderer {
-    static final int FRAMES = 3;
-    // Three RGB_565 frames at this size are ~400 kB in total, comfortably inside
-    // the RemoteViews transaction limit that a larger ARGB_8888 set would breach.
-    private static final int SIZE = 256;
+    /** Above this the RemoteViews payload gets uncomfortable; 320px covers a 2x2 at 3x density. */
+    private static final int MAX_SIZE = 320;
+    private static final int MIN_SIZE = 120;
+
+    // skyInner, skyMid, skyOuter, orbInner, orbOuter — one row per wind band.
+    private static final int[][] PALETTE = {
+            {0xFF2FBFA4, 0xFF127E8E, 0xFF0A3350, 0xFFEAFFF6, 0xFF5FE0C0},
+            {0xFF8FD14A, 0xFF1D8F7A, 0xFF0D3352, 0xFFF6FFE0, 0xFFB8E75F},
+            {0xFFF2A93C, 0xFFC8623A, 0xFF3A1A45, 0xFFFFF0E2, 0xFFFFB07A},
+            {0xFFFF9A5C, 0xFFC8323F, 0xFF3B1140, 0xFFFFF0E2, 0xFFFF8F6E},
+    };
 
     private WidgetRenderer() {
     }
 
-    static Bitmap frame(WidgetData data, int frame) {
-        Bitmap bitmap = Bitmap.createBitmap(SIZE, SIZE, Bitmap.Config.RGB_565);
+    static int clampSize(int requested) {
+        return Math.max(MIN_SIZE, Math.min(MAX_SIZE, requested));
+    }
+
+    static Bitmap scene(WidgetData data, int requestedSize) {
+        int size = clampSize(requestedSize);
+        Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        paint.setDither(true);
 
-        Group group = groupOf(data.weatherCode);
-        drawSky(canvas, paint, group, data.isDay);
-        float drift = (float) frame / FRAMES;
+        int[] palette = PALETTE[bandOf(data)];
+        float night = data.isDay ? 1f : 0.62f;
 
-        if (group == Group.CLEAR || group == Group.PARTLY) {
-            drawOrb(canvas, paint, data.isDay);
-        }
-        if (group != Group.CLEAR) {
-            drawClouds(canvas, paint, group, drift);
-        }
-        if (group == Group.RAIN || group == Group.STORM) {
-            drawRain(canvas, paint, frame, group == Group.STORM);
-        }
-        if (group == Group.SNOW) {
-            drawSnow(canvas, paint, frame);
-        }
-        drawSwell(canvas, paint, data, drift);
+        paint.setShader(new RadialGradient(
+                size * 0.28f, size * 0.18f, size * 1.05f,
+                new int[]{dim(palette[0], night), dim(palette[1], night), dim(palette[2], night)},
+                new float[]{0f, 0.46f, 1f},
+                Shader.TileMode.CLAMP));
+        canvas.drawRect(0, 0, size, size, paint);
+        paint.setShader(null);
+
+        drawOrb(canvas, paint, size, palette, night);
+        if (raining(data.weatherCode)) drawRain(canvas, paint, size, data.weatherCode >= 95);
+        drawSwell(canvas, paint, data, size, palette, night);
         return bitmap;
     }
 
-    private enum Group { CLEAR, PARTLY, CLOUD, FOG, RAIN, SNOW, STORM }
-
-    private static Group groupOf(int code) {
-        if (code < 0) return Group.PARTLY;
-        if (code == 0) return Group.CLEAR;
-        if (code == 1 || code == 2) return Group.PARTLY;
-        if (code == 3) return Group.CLOUD;
-        if (code == 45 || code == 48) return Group.FOG;
-        if (code >= 95) return Group.STORM;
-        if ((code >= 71 && code <= 77) || code == 85 || code == 86) return Group.SNOW;
-        if (code >= 51) return Group.RAIN;
-        return Group.PARTLY;
+    /** Four bands is the right resolution at this size; the table carries all seven. */
+    private static int bandOf(WidgetData data) {
+        double wind = WidgetData.has(data.windHigh) ? data.windHigh : 0;
+        if (wind < 10) return 0;
+        if (wind < 20) return 1;
+        if (wind < 30) return 2;
+        return 3;
     }
 
-    private static void drawSky(Canvas canvas, Paint paint, Group group, boolean isDay) {
-        int top;
-        int bottom = 0xFF07171F;
-        if (!isDay) {
-            top = group == Group.STORM ? 0xFF181B2A : 0xFF10263A;
-        } else {
-            switch (group) {
-                case CLEAR: top = 0xFF1E6E8C; break;
-                case PARTLY: top = 0xFF1D5F7A; break;
-                case STORM: top = 0xFF2A2E3D; break;
-                case RAIN: top = 0xFF243D4A; break;
-                case SNOW: top = 0xFF3A4A55; break;
-                case FOG: top = 0xFF33454E; break;
-                default: top = 0xFF244452; break;
-            }
-        }
-        paint.setShader(new LinearGradient(0, 0, 0, SIZE, top, bottom, Shader.TileMode.CLAMP));
-        canvas.drawRect(0, 0, SIZE, SIZE, paint);
+    private static boolean raining(int code) {
+        return code >= 51 && code != 71 && code != 73 && code != 75 && code != 77;
+    }
+
+    private static int dim(int color, float factor) {
+        if (factor >= 1f) return color;
+        return Color.argb(
+                Color.alpha(color),
+                Math.round(Color.red(color) * factor),
+                Math.round(Color.green(color) * factor),
+                Math.round(Color.blue(color) * factor));
+    }
+
+    /**
+     * The softness comes from the gradient itself plus one wide, very faint halo.
+     * There is no blur available here, and none is needed.
+     */
+    private static void drawOrb(Canvas canvas, Paint paint, int size, int[] palette, float night) {
+        float cx = size * 0.78f;
+        float cy = size * 0.78f;
+
+        paint.setColor(Color.WHITE);
+        paint.setAlpha(18);
+        canvas.drawCircle(cx - size * 0.02f, cy - size * 0.02f, size * 0.33f, paint);
+        paint.setAlpha(255);
+
+        paint.setShader(new RadialGradient(
+                cx - size * 0.06f, cy - size * 0.07f, size * 0.26f,
+                dim(palette[3], night), dim(palette[4], night),
+                Shader.TileMode.CLAMP));
+        paint.setAlpha(night >= 1f ? 235 : 200);
+        canvas.drawCircle(cx, cy, size * 0.23f, paint);
         paint.setShader(null);
-    }
-
-    private static void drawOrb(Canvas canvas, Paint paint, boolean isDay) {
-        paint.setColor(isDay ? 0xFFFFD68A : 0xFFD8E4E7);
-        paint.setAlpha(isDay ? 235 : 200);
-        canvas.drawCircle(SIZE * 0.74f, SIZE * 0.24f, SIZE * 0.11f, paint);
-        if (!isDay) {
-            // Bite a crescent out of the moon with the sky's own colour.
-            paint.setColor(0xFF10263A);
-            canvas.drawCircle(SIZE * 0.79f, SIZE * 0.20f, SIZE * 0.10f, paint);
-        }
         paint.setAlpha(255);
     }
 
-    private static void drawClouds(Canvas canvas, Paint paint, Group group, float drift) {
-        int tint;
-        switch (group) {
-            case STORM: tint = 0xFF3C4152; break;
-            case RAIN: tint = 0xFF52646E; break;
-            case FOG: tint = 0xFF6C7B84; break;
-            case SNOW: tint = 0xFF8A99A3; break;
-            case PARTLY: tint = 0xFF6E8A98; break;
-            default: tint = 0xFF5E7480; break;
-        }
-        paint.setColor(tint);
-        int count = group == Group.PARTLY ? 2 : 3;
-        for (int i = 0; i < count; i++) {
-            float phase = (drift + i * 0.37f) % 1f;
-            float cx = -SIZE * 0.2f + phase * SIZE * 1.4f;
-            float cy = SIZE * (0.20f + i * 0.11f);
-            float scale = 0.9f - i * 0.14f;
-            paint.setAlpha(200 - i * 35);
-            canvas.drawCircle(cx, cy, SIZE * 0.11f * scale, paint);
-            canvas.drawCircle(cx + SIZE * 0.09f * scale, cy - SIZE * 0.04f * scale, SIZE * 0.13f * scale, paint);
-            canvas.drawCircle(cx + SIZE * 0.20f * scale, cy, SIZE * 0.10f * scale, paint);
-            canvas.drawRect(cx, cy, cx + SIZE * 0.20f * scale, cy + SIZE * 0.10f * scale, paint);
-        }
-        paint.setAlpha(255);
-    }
-
-    private static void drawRain(Canvas canvas, Paint paint, int frame, boolean heavy) {
-        paint.setColor(heavy ? 0xFF9FD8FF : 0xFF7FB6D8);
-        paint.setStrokeWidth(SIZE * 0.008f);
-        paint.setAlpha(heavy ? 210 : 170);
-        int drops = heavy ? 26 : 16;
+    private static void drawRain(Canvas canvas, Paint paint, int size, boolean heavy) {
+        paint.setColor(0xFFFFFFFF);
+        paint.setAlpha(heavy ? 150 : 110);
+        paint.setStrokeWidth(Math.max(1f, size * 0.007f));
+        int drops = heavy ? 22 : 14;
         for (int i = 0; i < drops; i++) {
-            float x = ((i * 37) % 100) / 100f * SIZE;
-            float base = ((i * 53) % 100) / 100f;
-            float y = SIZE * 0.38f + ((base + frame / (float) FRAMES) % 1f) * SIZE * 0.42f;
-            canvas.drawLine(x, y, x - SIZE * 0.018f, y + SIZE * 0.055f, paint);
+            float x = ((i * 37) % 100) / 100f * size;
+            float y = ((i * 53) % 100) / 100f * size * 0.7f;
+            canvas.drawLine(x, y, x - size * 0.02f, y + size * 0.06f, paint);
         }
         paint.setAlpha(255);
     }
 
-    private static void drawSnow(Canvas canvas, Paint paint, int frame) {
-        paint.setColor(0xFFEDF6F7);
-        paint.setAlpha(200);
-        for (int i = 0; i < 20; i++) {
-            float x = ((i * 41) % 100) / 100f * SIZE;
-            float base = ((i * 61) % 100) / 100f;
-            float y = SIZE * 0.36f + ((base + frame / (float) FRAMES) % 1f) * SIZE * 0.44f;
-            canvas.drawCircle(x, y, SIZE * 0.011f, paint);
-        }
-        paint.setAlpha(255);
-    }
-
-    /** A swell line whose height follows the day's waves, so the sea is real data. */
-    private static void drawSwell(Canvas canvas, Paint paint, WidgetData data, float drift) {
+    /** The swell height is real data: the day's biggest wave sets the amplitude. */
+    private static void drawSwell(Canvas canvas, Paint paint, WidgetData data, int size, int[] palette, float night) {
         float metres = WidgetData.has(data.waveHigh) ? (float) data.waveHigh : 0f;
-        float amplitude = Math.min(SIZE * 0.05f, SIZE * 0.012f + metres * SIZE * 0.016f);
-        float baseline = SIZE * 0.84f;
+        float amplitude = Math.min(size * 0.05f, size * 0.012f + metres * size * 0.015f);
+        int deep = dim(palette[2], night);
 
         for (int layer = 0; layer < 2; layer++) {
             Path path = new Path();
-            float offset = drift * SIZE * 0.5f + layer * SIZE * 0.18f;
-            float lift = baseline + layer * SIZE * 0.05f;
-            path.moveTo(0, SIZE);
+            float lift = size * (0.86f + layer * 0.05f);
+            float offset = layer * size * 0.2f;
+            path.moveTo(0, size);
             path.lineTo(0, lift);
-            for (float x = 0; x <= SIZE; x += SIZE / 32f) {
-                double wave = Math.sin((x + offset) / (SIZE * 0.16f));
-                path.lineTo(x, lift + (float) wave * amplitude);
+            for (float x = 0; x <= size; x += size / 40f) {
+                path.lineTo(x, lift + (float) Math.sin((x + offset) / (size * 0.17f)) * amplitude);
             }
-            path.lineTo(SIZE, SIZE);
+            path.lineTo(size, size);
             path.close();
-            paint.setColor(layer == 0 ? 0xFF123A44 : 0xFF0B2831);
-            paint.setAlpha(layer == 0 ? 235 : 255);
+            paint.setColor(deep);
+            paint.setAlpha(layer == 0 ? 150 : 235);
             canvas.drawPath(path, paint);
         }
         paint.setAlpha(255);
