@@ -6,6 +6,12 @@
 # build output
 /dist/
 *.tsbuildinfo
+/.next/
+/.vinext/
+/.wrangler/
+/out/
+next-env.d.ts
+/.openai/
 
 # local environment
 .env*
