@@ -26,3 +26,14 @@
 .agreement.poor{background:#3a2119;color:#ff9c85}
 .table-group{grid-column:1/-1;padding:12px 0 6px;border-bottom:1px solid var(--line)}
 .table-group span{position:sticky;left:7px;font-size:8px;font-weight:900;letter-spacing:.16em;color:var(--accent)}
+.scale-chip{display:block;padding:6px 3px;border-radius:6px;font-weight:800;font-size:12px;line-height:1.1}
+.table-cell.night{background:#0a1c25}
+.table-head.night{background:#0a1c25;color:#6d8590}
+.table-head em{display:block;font-style:normal;font-size:9px;margin-top:2px;opacity:.75}
+.section-actions{display:flex;align-items:center;gap:8px}
+.table-toggle{border:1px solid var(--line);background:#0e252e;color:var(--muted);padding:7px 11px;border-radius:99px;font-size:9px;font-weight:800;letter-spacing:.06em}
+.table-toggle.on{background:var(--accent);border-color:var(--accent);color:#062018}
+.days-strip i{display:block;font-style:normal;font-size:10px;font-weight:700;margin-top:4px;color:#c4d4d9}
+.days-strip .active i{color:#062018}
+.days-strip em{color:inherit;opacity:.7}
+.days-strip button{min-width:74px}

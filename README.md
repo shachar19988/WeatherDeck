@@ -8,7 +8,9 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
   that day — air and sea together — is on a single screen
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
   option that averages them with the hourly spread and contributing model count
-- Side-by-side model comparison with a measured agreement score
+- Model comparison in place: one wind row per model, toggled on the same table
+- Wind carries a colour scale, hours after dark are shaded, and each day chip
+  shows that day's temperature range and strongest wind
 - 21-day rolling forecast
 - NOAA GEFS 31-member ensemble mean for the extended range
 - Forecast-confidence labels and ensemble spread for temperature and wind
@@ -30,6 +32,20 @@ roughly 7.5 days even though its time axis spans 16.
 For dates the operational model does not cover, the app switches to the NOAA GEFS
 0.5-degree ensemble mean and labels the source accordingly. As a date moves into
 operational range, the higher-resolution forecast takes over again.
+
+### Reading it at a glance
+
+Wind is the one variable with a colour scale — a single blue ramp, dark-anchored
+so calm air recedes into the panel and a gale reads brightest. Lightness is
+monotone across the ramp, adjacent steps differ by dL >= 0.09, and each band's
+ink clears 4.5:1 against its own fill. Every cell still prints its number, so
+colour is never the only channel. One scale doing one job beats colouring every
+row.
+
+Columns after dark are shaded and marked, so a run of night hours reads as a
+night instead of being worked out from the clock. Day chips carry that day's
+temperature range and strongest wind, which is usually enough to decide whether
+a day is worth opening at all.
 
 ### One table
 
