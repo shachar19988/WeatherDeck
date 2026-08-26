@@ -4,13 +4,24 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="theme-color" content="#07171f" />
+    <meta name="description" content="Multi-model wind, weather and marine forecasts." />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <title>WeatherDeck</title>
   </head>
   <body>
     <div id="root"></div>
     <script>
+      // Only a failure to boot should replace the page. Once React has mounted,
+      // a stray error (an embedded map, a ResizeObserver loop) must not wipe
+      // out a working app.
       window.addEventListener('error', function (event) {
-        document.body.innerHTML = '<main style="padding:24px;color:white;background:#07171f;min-height:100vh;font-family:sans-serif"><h2>WeatherDeck could not start</h2><p style="color:#9db0b8">' + String(event.message || 'Unknown loading error') + '</p></main>';
+        var root = document.getElementById('root');
+        if (root && root.childElementCount > 0) return;
+        document.body.innerHTML =
+          '<main style="padding:24px;color:white;background:#07171f;min-height:100vh;font-family:sans-serif">' +
+          '<h2>WeatherDeck could not start</h2><p style="color:#9db0b8"></p></main>';
+        document.querySelector('main p').textContent = String((event && event.message) || 'Unknown loading error');
       });
     </script>
     <script type="module" src="/src/main.tsx"></script>

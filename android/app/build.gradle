@@ -1,5 +1,9 @@
 apply plugin: 'com.android.application'
 
+// Release signing is opt-in through the environment so the repository never
+// carries a keystore. Without it, only debug builds are produced.
+def releaseKeystore = System.getenv('WEATHERDECK_KEYSTORE')
+
 android {
     namespace 'com.weatherdeck.personal'
     compileSdk 36
@@ -8,16 +12,46 @@ android {
         applicationId 'com.weatherdeck.personal'
         minSdk 26
         targetSdk 36
-        versionCode 6
-        versionName '1.1.1'
+        versionCode 7
+        versionName '1.2.0'
     }
 
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    // The web build output is packaged verbatim and served from a private
+    // https origin by MainActivity.
     sourceSets { main { assets.srcDirs = ['../../dist'] } }
+
+    signingConfigs {
+        release {
+            if (releaseKeystore) {
+                storeFile file(releaseKeystore)
+                storePassword System.getenv('WEATHERDECK_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('WEATHERDECK_KEY_ALIAS')
+                keyPassword System.getenv('WEATHERDECK_KEY_PASSWORD')
+            }
+        }
+    }
 
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (releaseKeystore) signingConfig signingConfigs.release
+        }
+    }
+}
+
+// Failing here beats shipping an APK whose assets folder has no interface in it.
+tasks.configureEach { task ->
+    if (task.name == 'preBuild') {
+        task.doFirst {
+            if (!file('../../dist/index.html').exists()) {
+                throw new GradleException("dist/index.html is missing — run 'npm run build' in the repository root before building the APK.")
+            }
         }
     }
 }

@@ -1,11 +1,24 @@
-import { defineConfig, globalIgnores } from 'eslint/config';
-import nextVitals from 'eslint-config-next/core-web-vitals';
-import nextTs from 'eslint-config-next/typescript';
+import js from '@eslint/js';
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
+import reactHooks from 'eslint-plugin-react-hooks';
+import jsxA11y from 'eslint-plugin-jsx-a11y';
 
-const eslintConfig = defineConfig([
-  ...nextVitals,
-  ...nextTs,
-  globalIgnores(['.next/**', 'out/**', 'build/**', 'next-env.d.ts']),
-]);
-
-export default eslintConfig;
+export default tseslint.config(
+  { ignores: ['dist/**', 'android/**', 'node_modules/**'] },
+  js.configs.recommended,
+  ...tseslint.configs.recommended,
+  reactHooks.configs.flat['recommended-latest'],
+  jsxA11y.flatConfigs.recommended,
+  {
+    files: ['**/*.{ts,tsx}'],
+    languageOptions: {
+      globals: globals.browser,
+      parserOptions: { ecmaFeatures: { jsx: true } },
+    },
+  },
+  {
+    files: ['public/sw.js'],
+    languageOptions: { globals: { ...globals.serviceworker, ...globals.browser } },
+  },
+);

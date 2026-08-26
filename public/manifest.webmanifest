@@ -1,10 +1,20 @@
 {
+  "id": "/",
   "name": "WeatherDeck",
   "short_name": "WeatherDeck",
   "description": "Personal multi-model wind, weather and marine forecast console.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#07171f",
   "theme_color": "#07171f",
-  "orientation": "portrait-primary"
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    }
+  ]
 }

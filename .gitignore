@@ -2,23 +2,13 @@
 /node_modules
 /.pnp
 .pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
 
-# testing
-/coverage
+# build output
+/dist/
+*.tsbuildinfo
 
-# next.js
-/.next/
-/.vinext/
-/out/
-
-# misc
-.DS_Store
-*.pem
+# local environment
+.env*
 
 # debug
 npm-debug.log*
@@ -26,18 +16,9 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# local environment
-.env*
-
-# deployment and generated files
-.vercel
-next-env.d.ts
-/dist/
-/.wrangler/
-/outputs/
-/work/
-/.openai/
-*.tsbuildinfo
+# misc
+.DS_Store
+*.pem
 
 # Android local and generated files
 /android/.gradle/
@@ -45,3 +26,5 @@ next-env.d.ts
 /android/app/build/
 /android/local.properties
 *.apk
+*.keystore
+*.jks
