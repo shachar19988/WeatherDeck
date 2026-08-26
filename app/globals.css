@@ -20,3 +20,7 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 .sheet-dismiss{position:absolute;inset:0;width:100%;border:0;padding:0;background:transparent;cursor:default}
 .sheet{position:relative;z-index:1}
+.agreement{display:inline-block;padding:4px 7px;border-radius:6px;font-size:11px;font-weight:800}
+.agreement.good{background:#123029;color:var(--accent)}
+.agreement.fair{background:#332c14;color:#e2d271}
+.agreement.poor{background:#3a2119;color:#ff9c85}

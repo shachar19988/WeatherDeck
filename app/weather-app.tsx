@@ -6,6 +6,7 @@ type Series = (number | null)[];
 type Hourly = { time: string[] } & Record<string, Series | string[]>;
 type Forecast = { hourly: Hourly; hourly_units?: Record<string, string>; utc_offset_seconds?: number };
 type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS';
+type ActiveModel = ModelKey | 'MEAN';
 type ViewKey = 'Forecast' | 'Compare' | 'Marine' | 'Map' | 'Saved';
 type DataSource = 'live' | 'cache' | 'none';
 type CachePayload = { forecasts: Partial<Record<ModelKey, Forecast>>; marine: Forecast | null; extended: Forecast | null; savedAt: number };
@@ -23,7 +24,14 @@ const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
 const DEFAULT_LOCATION: Location = { name: 'Haifa', country: 'Israel', latitude: 32.794, longitude: 34.9896 };
 const WEATHER_VARS = 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cape';
 const LONG_RANGE_VARS = 'temperature_2m,temperature_2m_spread,relative_humidity_2m,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_speed_10m_spread,wind_direction_10m,wind_gusts_10m';
-const MARINE_VARS = 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
+const MARINE_VARS = 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
+
+const SPREAD_SUFFIX = '__spread';
+const COUNT_SUFFIX = '__models';
+const CONSENSUS_KEYS = ['temperature_2m', 'relative_humidity_2m', 'precipitation_probability', 'precipitation', 'cloud_cover', 'pressure_msl', 'wind_speed_10m', 'wind_direction_10m', 'wind_gusts_10m', 'cape'];
+// Bearings cannot be averaged arithmetically: the mean of 350 and 10 is 180,
+// which points the opposite way. They are averaged as unit vectors instead.
+const CIRCULAR_KEYS = new Set(['wind_direction_10m']);
 
 const CACHE_PREFIX = 'weatherdeck:cache:';
 const FAVORITES_KEY = 'weatherdeck:favorites';
@@ -176,6 +184,74 @@ function loadWindAlert() {
   return Number.isFinite(value) && value >= 5 && value <= 40 ? value : 15;
 }
 
+// Three-hourly slots covering one day, starting at the current hour when that
+// day is today at the forecast location.
+function daySlots(data: Forecast | null, date: string | undefined, nowIndex: number) {
+  if (!date) return [];
+  const all = indexesForDate(data, date);
+  const fromNow = date === localDateAt(data) ? all.filter(index => index >= nowIndex) : all;
+  const usable = fromNow.length ? fromNow : all;
+  return usable.filter((_, i) => i % 3 === 0).slice(0, 8);
+}
+
+/**
+ * Averages the operational models onto a single time axis, hour by hour.
+ *
+ * Only the models that actually publish a value at a given hour contribute, so
+ * the mean silently narrows as the shorter-range models drop out. That would be
+ * misleading on its own, so every variable also carries how many models went
+ * into it and how far apart they were: a "mean" of one model is not a
+ * consensus, and the table says so.
+ */
+function buildConsensus(forecasts: Partial<Record<ModelKey, Forecast>>) {
+  const members = MODEL_KEYS
+    .map(key => forecasts[key])
+    .filter((forecast): forecast is Forecast => Boolean(forecast?.hourly?.time?.length));
+  if (members.length < 2) return null;
+
+  const axis = members.reduce((longest, forecast) => (forecast.hourly.time.length > longest.hourly.time.length ? forecast : longest), members[0]);
+  const times = axis.hourly.time;
+  // Aligned by timestamp rather than by position: the models agree on their
+  // axis today, but nothing in the API guarantees they always will.
+  const lookups = members.map(member => {
+    const positions = new Map<string, number>();
+    member.hourly.time.forEach((time, index) => positions.set(time, index));
+    return { member, positions };
+  });
+
+  const hourly: Record<string, Series | string[]> = { time: times };
+  for (const key of CONSENSUS_KEYS) {
+    const mean: Series = [];
+    const count: Series = [];
+    const spread: Series = [];
+    const circular = CIRCULAR_KEYS.has(key);
+    for (const time of times) {
+      const values: number[] = [];
+      for (const entry of lookups) {
+        const index = entry.positions.get(time);
+        if (index === undefined) continue;
+        const value = reading(entry.member, key, index);
+        if (value !== null) values.push(value);
+      }
+      if (!values.length) { mean.push(null); count.push(null); spread.push(null); continue; }
+      count.push(values.length);
+      if (circular) {
+        const x = values.reduce((sum, value) => sum + Math.cos((value * Math.PI) / 180), 0);
+        const y = values.reduce((sum, value) => sum + Math.sin((value * Math.PI) / 180), 0);
+        mean.push(x === 0 && y === 0 ? null : (((Math.atan2(y, x) * 180) / Math.PI) + 360) % 360);
+        spread.push(null);
+      } else {
+        mean.push(values.reduce((sum, value) => sum + value, 0) / values.length);
+        spread.push(values.length > 1 ? Math.max(...values) - Math.min(...values) : null);
+      }
+    }
+    hourly[key] = mean;
+    hourly[key + COUNT_SUFFIX] = count;
+    hourly[key + SPREAD_SUFFIX] = spread;
+  }
+  return { hourly: hourly as Hourly, utc_offset_seconds: axis.utc_offset_seconds, members: members.length };
+}
+
 // Kept out of the component so the memo around it stays a single call the
 // React Compiler can preserve.
 function findWindAlert(data: Forecast | null, from: number, threshold: number, key: string) {
@@ -198,7 +274,7 @@ async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T | null>
 
 export default function WeatherApp() {
   const [location, setLocation] = useState<Location>(DEFAULT_LOCATION);
-  const [activeModel, setActiveModel] = useState<ModelKey>('ECMWF');
+  const [activeModel, setActiveModel] = useState<ActiveModel>('ECMWF');
   const [activeView, setActiveView] = useState<ViewKey>('Forecast');
   const [forecasts, setForecasts] = useState<Partial<Record<ModelKey, Forecast>>>({});
   const [extended, setExtended] = useState<Forecast | null>(null);
@@ -336,7 +412,8 @@ export default function WeatherApp() {
     return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = previous; };
   }, [searchOpen, settingsOpen]);
 
-  const current = forecasts[activeModel] || null;
+  const consensus = useMemo(() => buildConsensus(forecasts), [forecasts]);
+  const current = activeModel === 'MEAN' ? consensus : (forecasts[activeModel] || null);
   const anyModelLoaded = Object.keys(forecasts).length > 0;
   const nowIndex = useMemo(() => nowIndexFor(current), [current]);
   const currentTemp = reading(current, 'temperature_2m', nowIndex);
@@ -359,29 +436,42 @@ export default function WeatherApp() {
   const usingExtended = Boolean(selectedDate && !coversDate(current, selectedDate) && coversDate(extended, selectedDate));
   const forecastData = usingExtended ? extended : current;
   const dataNowIndex = useMemo(() => nowIndexFor(forecastData), [forecastData]);
-  const forecastIndexes = useMemo(() => {
-    if (!selectedDate) return [];
-    const all = indexesForDate(forecastData, selectedDate);
-    const fromNow = selectedDate === localDateAt(forecastData) ? all.filter(index => index >= dataNowIndex) : all;
-    const usable = fromNow.length ? fromNow : all;
-    return usable.filter((_, i) => i % 3 === 0).slice(0, 8);
-  }, [forecastData, selectedDate, dataNowIndex]);
+  const forecastIndexes = useMemo(() => daySlots(forecastData, selectedDate, dataNowIndex), [forecastData, selectedDate, dataNowIndex]);
 
   const representativeIndex = forecastIndexes[Math.min(4, forecastIndexes.length - 1)] ?? 0;
   const spreadTemp = usingExtended ? reading(extended, 'temperature_2m_spread', representativeIndex) : null;
   const spreadWind = usingExtended ? reading(extended, 'wind_speed_10m_spread', representativeIndex) : null;
+  const meanSpread = activeModel === 'MEAN' ? reading(current, 'wind_speed_10m' + SPREAD_SUFFIX, representativeIndex) : null;
+  const meanCount = activeModel === 'MEAN' ? reading(current, 'wind_speed_10m' + COUNT_SUFFIX, representativeIndex) : null;
   const sourceDetail = usingExtended
     ? `GEFS ensemble mean${spreadTemp !== null ? ` · ±${spreadTemp.toFixed(1)}°C` : ''}${spreadWind !== null ? ` · wind ±${spreadWind.toFixed(1)} kt` : ''}`
-    : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
+    : activeModel === 'MEAN'
+      ? current
+        ? `Mean of ${meanCount ?? consensus?.members ?? 0} models${meanSpread !== null ? ` · wind spread ${meanSpread.toFixed(1)} kt` : ''}`
+        : 'At least two models are needed for a mean'
+      : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
+  const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
 
   const compareIndexes = useMemo(() => stepIndexes(current, nowIndex, 3, 8), [current, nowIndex]);
   const marineNowIndex = useMemo(() => nowIndexFor(marine), [marine]);
-  const marineIndexes = useMemo(() => stepIndexes(marine, marineNowIndex, 3, 8), [marine, marineNowIndex]);
   const marineAvailable = hasSeries(marine, 'wave_height');
+  const marineDays = useMemo(
+    () => days.map((day, index) => ({ day, index })).filter(entry => coversDate(marine, entry.day, 'wave_height')),
+    [days, marine],
+  );
+  const marineSlots = useMemo(() => daySlots(marine, selectedDate, marineNowIndex), [marine, selectedDate, marineNowIndex]);
 
   const weatherDayIndexes = useMemo(() => indexesForDate(forecastData, selectedDate), [forecastData, selectedDate]);
   const marineDayIndexes = useMemo(() => indexesForDate(marine, selectedDate), [marine, selectedDate]);
   const peakWave = useMemo(() => maximumReading(marine, 'wave_height', marineDayIndexes), [marine, marineDayIndexes]);
+  // The marine summary follows the selected day rather than always reading
+  // "now": on any day but today the current hour says nothing about it.
+  const marineFocus = useMemo(() => {
+    if (selectedDate && selectedDate !== localDateAt(marine) && peakWave) {
+      return { index: peakWave.index, label: `daily peak at ${formatHour(marine?.hourly?.time?.[peakWave.index])}` };
+    }
+    return { index: marineNowIndex, label: 'now' };
+  }, [marine, selectedDate, peakWave, marineNowIndex]);
   const rainChance = useMemo(() => maximumReading(forecastData, 'precipitation_probability', weatherDayIndexes), [forecastData, weatherDayIndexes]);
   const peakCape = useMemo(() => maximumReading(forecastData, 'cape', weatherDayIndexes), [forecastData, weatherDayIndexes]);
   const dailyRain = useMemo(() => {
@@ -515,7 +605,11 @@ export default function WeatherApp() {
         </section>
 
         {windAlertHit && <p className="alert-banner" role="status">Wind alert · {windAlertHit.value.toFixed(0)} kt expected around {formatHour(windAlertHit.time)} (threshold {windAlert} kt)</p>}
-        {!current && anyModelLoaded && <p className="notice">{activeModel} did not return data for this location. Pick another model below.</p>}
+        {!current && anyModelLoaded && (
+          <p className="notice">{activeModel === 'MEAN'
+            ? 'A model mean needs at least two models, and only one returned data for this location.'
+            : `${activeModel} did not return data for this location. Pick another model below.`}</p>
+        )}
 
         <nav className="model-tabs" aria-label="Forecast model">
           {MODEL_KEYS.map(model => (
@@ -523,7 +617,12 @@ export default function WeatherApp() {
               <span>{model}</span><small>{MODEL_META[model].resolution}</small>
             </button>
           ))}
-          <button type="button" onClick={() => setActiveView('Compare')}><span>COMPARE</span><small>4 models</small></button>
+          {consensus && (
+            <button type="button" className={activeModel === 'MEAN' ? 'active' : ''} aria-pressed={activeModel === 'MEAN'} onClick={() => setActiveModel('MEAN')}>
+              <span>MEAN</span><small>{consensus.members} models</small>
+            </button>
+          )}
+          <button type="button" onClick={() => setActiveView('Compare')}><span>COMPARE</span><small>{MODEL_KEYS.length} models</small></button>
         </nav>
 
         <section className="days-strip">
@@ -542,7 +641,15 @@ export default function WeatherApp() {
           <small>{sourceDetail}</small>
         </section>
 
-        <ForecastTable data={forecastData} indexes={forecastIndexes} badge={usingExtended ? 'ENSEMBLE' : 'HOURLY'} model={activeModel} />
+        <ReadingTable
+          data={forecastData}
+          indexes={forecastIndexes}
+          rows={activeModel === 'MEAN' && !usingExtended ? MEAN_ROWS : WEATHER_ROWS}
+          eyebrow="DETAILED FORECAST"
+          title="Wind & weather"
+          badge={usingExtended ? 'ENSEMBLE' : activeModel === 'MEAN' ? 'MODEL MEAN' : 'HOURLY'}
+          subject={usingExtended ? 'The ensemble mean' : modelSubject}
+        />
 
         <section className="quick-grid">
           <button type="button" onClick={() => setActiveView('Marine')}>
@@ -566,7 +673,18 @@ export default function WeatherApp() {
       </>}
 
       {activeView === 'Compare' && <CompareView forecasts={forecasts} indexes={compareIndexes} onSelect={model => { setActiveModel(model); setSelectedDay(0); setActiveView('Forecast'); }} />}
-      {activeView === 'Marine' && <MarineView data={marine} indexes={marineIndexes} available={marineAvailable} />}
+      {activeView === 'Marine' && (
+        <MarineView
+          data={marine}
+          days={marineDays}
+          dayIndex={dayIndex}
+          slots={marineSlots}
+          focus={marineFocus}
+          selectedDate={selectedDate}
+          available={marineAvailable}
+          onSelectDay={setSelectedDay}
+        />
+      )}
       {activeView === 'Map' && <MapView location={location} />}
       {activeView === 'Saved' && <SavedView favorites={favorites} onSelect={selectLocation} onGps={requestGps} onRemove={removeFavorite} gpsError={gpsError} />}
 
@@ -632,27 +750,75 @@ export default function WeatherApp() {
 
 /* ---------- views ---------- */
 
-type Row = { key: string; label: string; unit: string; render: (value: number) => ReactNode };
-const TABLE_ROWS: Row[] = [
-  { key: 'wind_direction_10m', label: 'Direction', unit: '', render: value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span> },
-  { key: 'wind_speed_10m', label: 'Wind', unit: 'kt', render: value => value.toFixed(1) },
-  { key: 'wind_gusts_10m', label: 'Gusts', unit: 'kt', render: value => value.toFixed(1) },
-  { key: 'temperature_2m', label: 'Temperature', unit: '°C', render: value => <span className="temp-pill">{Math.round(value)}°</span> },
-  { key: 'pressure_msl', label: 'Pressure', unit: 'hPa', render: value => Math.round(value) },
-  { key: 'precipitation', label: 'Rain', unit: 'mm', render: value => value.toFixed(1) },
-  { key: 'cloud_cover', label: 'Clouds', unit: '%', render: value => Math.round(value) },
+type Row = { key: string; label: string; unit: string; render: (data: Forecast | null, index: number) => ReactNode };
+
+const EMPTY_CELL = <span className="table-empty">—</span>;
+function numberCell(data: Forecast | null, key: string, index: number, format: (value: number) => ReactNode) {
+  const value = reading(data, key, index);
+  return value === null ? EMPTY_CELL : format(value);
+}
+function arrowCell(data: Forecast | null, key: string, index: number) {
+  return numberCell(data, key, index, value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>);
+}
+
+const WEATHER_ROWS: Row[] = [
+  { key: 'wind_direction_10m', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wind_direction_10m', index) },
+  { key: 'wind_speed_10m', label: 'Wind', unit: 'kt', render: (data, index) => numberCell(data, 'wind_speed_10m', index, value => value.toFixed(1)) },
+  { key: 'wind_gusts_10m', label: 'Gusts', unit: 'kt', render: (data, index) => numberCell(data, 'wind_gusts_10m', index, value => value.toFixed(1)) },
+  { key: 'temperature_2m', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
+  { key: 'pressure_msl', label: 'Pressure', unit: 'hPa', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
+  { key: 'precipitation', label: 'Rain', unit: 'mm', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
+  { key: 'cloud_cover', label: 'Clouds', unit: '%', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
+];
+
+// Shown only for the mean: a mean is worth no more than the agreement behind
+// it, so the spread and the number of contributing models sit in the table.
+const AGREEMENT_ROWS: Row[] = [
+  {
+    key: 'wind_speed_10m' + SPREAD_SUFFIX,
+    label: 'Wind spread',
+    unit: 'kt',
+    render: (data, index) => numberCell(data, 'wind_speed_10m' + SPREAD_SUFFIX, index,
+      value => <span className={`agreement ${value < 3 ? 'good' : value < 6 ? 'fair' : 'poor'}`}>{value.toFixed(1)}</span>),
+  },
+  {
+    key: 'wind_speed_10m' + COUNT_SUFFIX,
+    label: 'Models used',
+    unit: `of ${MODEL_KEYS.length}`,
+    render: (data, index) => numberCell(data, 'wind_speed_10m' + COUNT_SUFFIX, index, value => String(value)),
+  },
+];
+const MEAN_ROWS: Row[] = [...WEATHER_ROWS, ...AGREEMENT_ROWS];
+
+const MARINE_ROWS: Row[] = [
+  { key: 'wave_direction', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
+  { key: 'wave_height', label: 'Waves', unit: 'm', render: (data, index) => numberCell(data, 'wave_height', index, value => value.toFixed(1)) },
+  { key: 'wave_period', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
+  { key: 'swell_wave_height', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
+  { key: 'swell_wave_period', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
+  { key: 'wind_wave_height', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
+  { key: 'ocean_current_velocity', label: 'Current', unit: 'km/h', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
+  { key: 'sea_level_height_msl', label: 'Sea level', unit: 'm', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
 ];
 
 // The column count travels to the grid as a custom property rather than a full
 // grid-template-columns value, so the responsive rules in the stylesheet still
 // win over the inline style.
-function ForecastTable({ data, indexes, badge, model }: { data: Forecast | null; indexes: number[]; badge: string; model: ModelKey }) {
-  const rows = TABLE_ROWS.filter(row => hasSeries(data, row.key));
-  const missing = TABLE_ROWS.filter(row => !rows.includes(row));
+function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, subject }: {
+  data: Forecast | null;
+  indexes: number[];
+  rows: Row[];
+  badge: string;
+  eyebrow: string;
+  title: string;
+  subject: string;
+}) {
+  const rows = candidates.filter(row => hasSeries(data, row.key));
+  const missing = candidates.filter(row => !rows.includes(row));
   return (
     <section className="forecast-card">
       <div className="section-title">
-        <div><p className="eyebrow">DETAILED FORECAST</p><h2>Wind &amp; weather</h2></div>
+        <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
         <span className="live-badge">{badge}</span>
       </div>
       {rows.length && indexes.length ? (
@@ -662,18 +828,15 @@ function ForecastTable({ data, indexes, badge, model }: { data: Forecast | null;
           {rows.map(row => (
             <div className="table-row" key={row.label}>
               <div className="table-label"><b>{row.label}</b><small>{row.unit}</small></div>
-              {indexes.map(index => {
-                const value = reading(data, row.key, index);
-                return <div className="table-cell" key={index}>{value === null ? <span className="table-empty">—</span> : row.render(value)}</div>;
-              })}
+              {indexes.map(index => <div className="table-cell" key={index}>{row.render(data, index)}</div>)}
             </div>
           ))}
         </div>
       ) : (
-        <p className="notice">{model} publishes no data for this day. Choose a shorter lead time or another model.</p>
+        <p className="notice">{subject} publishes no data for this day. Choose another day or source.</p>
       )}
       {rows.length > 0 && missing.length > 0 && (
-        <p className="data-note">Not shown: {missing.map(row => row.label).join(', ')} — not published by this model.</p>
+        <p className="data-note">Not shown: {missing.map(row => row.label).join(', ')} — not published by this source.</p>
       )}
     </section>
   );
@@ -739,11 +902,25 @@ function CompareView({ forecasts, indexes, onSelect }: { forecasts: Partial<Reco
   );
 }
 
-function MarineView({ data, indexes, available }: { data: Forecast | null; indexes: number[]; available: boolean }) {
-  const index = indexes[0] ?? 0;
+function MarineView({ data, days, dayIndex, slots, focus, selectedDate, available, onSelectDay }: {
+  data: Forecast | null;
+  days: { day: string; index: number }[];
+  dayIndex: number;
+  slots: number[];
+  focus: { index: number; label: string };
+  selectedDate?: string;
+  available: boolean;
+  onSelectDay: (index: number) => void;
+}) {
+  const index = focus.index;
+  const heading = selectedDate ? `${dayLabel(selectedDate).dow} ${dayLabel(selectedDate).date}` : '';
   return (
     <section className="view-page">
-      <div className="view-heading"><p className="eyebrow">MARINE FORECAST</p><h1>Sea conditions</h1><p>Wave, swell and current guidance for your selected coordinates.</p></div>
+      <div className="view-heading">
+        <p className="eyebrow">MARINE FORECAST{heading ? ` · ${heading}` : ''}</p>
+        <h1>Sea conditions</h1>
+        <p>Wave, swell and current guidance for your selected coordinates, hour by hour.</p>
+      </div>
       {!available ? (
         <p className="notice">No marine forecast covers this point. The wave models only resolve open water, so inland and sheltered coordinates return nothing.</p>
       ) : (
@@ -751,7 +928,7 @@ function MarineView({ data, indexes, available }: { data: Forecast | null; index
           <div className="marine-hero">
             <div className="wave-orb"><span aria-hidden="true">≈</span></div>
             <div>
-              <p>Significant wave height</p>
+              <p>Significant wave height, {focus.label}</p>
               <strong>{fixed(reading(data, 'wave_height', index), 1)} m</strong>
               <small>{cardinal(reading(data, 'wave_direction', index))} · {fixed(reading(data, 'wave_period', index), 0)} second period</small>
             </div>
@@ -761,22 +938,23 @@ function MarineView({ data, indexes, available }: { data: Forecast | null; index
             <article><span>CURRENT</span><strong>{fixed(reading(data, 'ocean_current_velocity', index), 2)} km/h</strong><small>{cardinal(reading(data, 'ocean_current_direction', index))}</small></article>
             <article><span>SEA LEVEL</span><strong>{fixed(reading(data, 'sea_level_height_msl', index), 2)} m</strong><small>Modelled height</small></article>
           </div>
-          <section className="marine-timeline">
-            <div className="section-title"><div><p className="eyebrow">SEA STATE</p><h2>Next 24 hours</h2></div></div>
-            {indexes.map(rowIndex => {
-              const height = reading(data, 'wave_height', rowIndex);
-              const direction = reading(data, 'wave_direction', rowIndex);
+
+          <section className="days-strip" aria-label="Marine forecast day">
+            {days.map(entry => {
+              const label = dayLabel(entry.day);
               return (
-                <div className="marine-row" key={rowIndex}>
-                  <time>{formatHour(data?.hourly?.time?.[rowIndex])}</time>
-                  <span className="wave-direction" style={direction === null ? undefined : { transform: `rotate(${direction}deg)` }} aria-hidden="true">{direction === null ? '·' : '↑'}</span>
-                  <b>{fixed(height, 1)} m</b>
-                  <small>{fixed(reading(data, 'wave_period', rowIndex), 0)} s</small>
-                  <div className="wave-meter"><span style={{ width: `${height === null ? 0 : Math.min(100, height * 45)}%` }} /></div>
-                </div>
+                <button type="button" key={entry.day} className={dayIndex === entry.index ? 'active' : ''} aria-pressed={dayIndex === entry.index} onClick={() => onSelectDay(entry.index)}>
+                  <b>{label.dow}</b><span>{label.date}</span><em>D+{entry.index}</em>
+                </button>
               );
             })}
           </section>
+
+          {slots.length ? (
+            <ReadingTable data={data} indexes={slots} rows={MARINE_ROWS} eyebrow="SEA STATE" title="Hourly waves" badge="HOURLY" subject="The marine model" />
+          ) : (
+            <p className="notice">The wave models reach about ten days ahead, which does not cover the day selected on the forecast page. Pick an earlier day above.</p>
+          )}
           <p className="data-note">Sea-level values are model guidance and should not replace official local tide tables.</p>
         </>
       )}

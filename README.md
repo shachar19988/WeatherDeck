@@ -5,12 +5,15 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 ## Features
 
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection
+- A MEAN tab averaging every available model into one table, with the hourly
+  spread and the number of contributing models shown alongside it
 - Side-by-side model comparison with a measured agreement score
 - 21-day rolling forecast
 - NOAA GEFS 31-member ensemble mean for the extended range
 - Forecast-confidence labels and ensemble spread for temperature and wind
 - Wind, gusts, temperature, pressure, precipitation, cloud cover and CAPE
-- Marine wave, swell and current guidance
+- Hourly marine forecast — wave, swell, wind wave, current and sea level — for
+  the same day selected on the forecast page
 - Location search, GPS location and on-device saved spots
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
@@ -27,6 +30,15 @@ roughly 7.5 days even though its time axis spans 16.
 For dates the operational model does not cover, the app switches to the NOAA GEFS
 0.5-degree ensemble mean and labels the source accordingly. As a date moves into
 operational range, the higher-resolution forecast takes over again.
+
+### The model mean
+
+The MEAN tab averages the operational models hour by hour. Only the models that
+publish a value at a given hour contribute, so the mean narrows on its own as
+the shorter-range models drop out — the table shows how many models went into
+each column and how far apart they were, because a mean of one model is not a
+consensus. Wind direction is averaged as a unit vector: the arithmetic mean of
+350° and 10° is 180°, which points the opposite way.
 
 Models also differ in *which* variables they publish — ECMWF AIFS provides no
 gusts, no CAPE and no precipitation probability. Rows and cards for variables a
