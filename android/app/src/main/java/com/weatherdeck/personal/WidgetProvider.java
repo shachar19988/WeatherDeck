@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.util.Log;
+import android.util.TypedValue;
 import android.widget.RemoteViews;
 import java.text.DateFormat;
 import java.util.Date;
@@ -83,7 +84,10 @@ public class WidgetProvider extends AppWidgetProvider {
         WidgetData data = WidgetData.load(context);
         for (int widgetId : widgetIds) {
             try {
-                manager.updateAppWidget(widgetId, build(context, data, sceneSize(context, manager, widgetId)));
+                int dp = widgetDp(manager, widgetId);
+                float density = context.getResources().getDisplayMetrics().density;
+                int sceneSize = WidgetRenderer.clampSize(Math.round(dp * density));
+                manager.updateAppWidget(widgetId, build(context, data, sceneSize, dp / (float) FALLBACK_DP));
             } catch (Throwable failure) {
                 Log.w(TAG, "Widget render failed", failure);
             }
@@ -91,26 +95,26 @@ public class WidgetProvider extends AppWidgetProvider {
     }
 
     /**
-     * Draw at the widget's real pixel size rather than drawing small and letting
-     * the launcher stretch it, which is what makes a gradient look cheap.
+     * The widget's own size in dp. Used both to draw the scene at its real pixel
+     * size, rather than drawing small and letting the launcher stretch it, and to
+     * scale the type so a resized widget stays readable instead of keeping the
+     * text it had at 2x2.
      */
-    private static int sceneSize(Context context, AppWidgetManager manager, int widgetId) {
-        int dp = FALLBACK_DP;
+    private static int widgetDp(AppWidgetManager manager, int widgetId) {
         try {
             Bundle options = manager.getAppWidgetOptions(widgetId);
             if (options != null) {
                 int width = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 0);
                 int height = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 0);
-                dp = Math.max(Math.max(width, height), FALLBACK_DP);
+                return Math.max(Math.max(width, height), FALLBACK_DP);
             }
         } catch (Throwable ignored) {
             // Some launchers hand back nothing useful; the fallback covers a 2x2.
         }
-        float density = context.getResources().getDisplayMetrics().density;
-        return WidgetRenderer.clampSize(Math.round(dp * density));
+        return FALLBACK_DP;
     }
 
-    private static RemoteViews build(Context context, WidgetData data, int sceneSize) {
+    private static RemoteViews build(Context context, WidgetData data, int sceneSize, float typeScale) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget);
         try {
             Bitmap scene = WidgetRenderer.scene(data, sceneSize);
@@ -125,11 +129,21 @@ public class WidgetProvider extends AppWidgetProvider {
         views.setTextViewText(R.id.widget_sea, seaLine(data));
         views.setTextViewText(R.id.widget_updated, updatedLabel(data));
 
+        float scale = Math.max(0.9f, Math.min(1.8f, typeScale));
+        setSize(views, R.id.widget_place, 13f * scale);
+        setSize(views, R.id.widget_temp, 34f * scale);
+        setSize(views, R.id.widget_sea, 15f * scale);
+        setSize(views, R.id.widget_updated, 11f * scale);
+
         Intent open = new Intent(context, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         views.setOnClickPendingIntent(R.id.widget_root, PendingIntent.getActivity(
                 context, 0, open, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE));
         return views;
+    }
+
+    private static void setSize(RemoteViews views, int viewId, float sp) {
+        views.setTextViewTextSize(viewId, TypedValue.COMPLEX_UNIT_SP, sp);
     }
 
     private static String seaLine(WidgetData data) {

@@ -41,6 +41,12 @@
 .graph-legend{display:flex;gap:12px}
 .graph-legend span{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--muted);font-weight:700}
 .graph-legend i{width:9px;height:9px;border-radius:3px}
+.ramp-legend{gap:0!important}
+.ramp-legend i{width:11px;height:9px;border-radius:0}
+.ramp-legend i:first-child{border-radius:3px 0 0 3px}
+.ramp-legend i:nth-last-child(2){border-radius:0 3px 3px 0}
+.ramp-legend b{margin-left:6px;font-size:9px;color:var(--muted)}
+.graph-tooltip em{font-style:normal;color:var(--orange);margin-left:4px}
 .graph-frame{position:relative;margin-top:12px}
 .graph-frame svg{display:block;width:100%;height:auto;touch-action:pan-y}
 .graph-tooltip{position:absolute;top:0;right:0;margin:0;padding:6px 9px;background:#0a1c24ee;border:1px solid var(--line);border-radius:8px;font-size:10px;color:#d8e4e7;pointer-events:none}
@@ -49,5 +55,5 @@
 .dir-cell.offshore::after{content:'';position:absolute;left:50%;bottom:-4px;transform:translateX(-50%);width:4px;height:4px;border-radius:50%;background:var(--orange)}
 .offshore-note{display:flex;align-items:center;gap:7px}
 .offshore-dot{width:5px;height:5px;min-width:5px;border-radius:50%;background:var(--orange)}
-.wave-chip{display:block;padding:6px 3px;border-radius:6px;font-weight:800;font-size:12px;line-height:1.1;background:linear-gradient(90deg,#d9592644 var(--fill,0%),transparent var(--fill,0%))}
+.wave-chip{display:block;padding:6px 3px;border-radius:6px;font-weight:800;font-size:12px;line-height:1.1;background:linear-gradient(90deg,#6da7ec3d var(--fill,0%),transparent var(--fill,0%))}
 .temp-pill.water{background:#1d6f7d}

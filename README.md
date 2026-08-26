@@ -8,8 +8,9 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
   that day — air and sea together — is on a single screen
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
   option that averages them with the hourly spread and contributing model count
-- Wind and waves graphed for the selected day at full hourly resolution, as two
-  plots sharing one time axis
+- Wind and waves graphed for the selected day at full hourly resolution: wind as
+  bars coloured by strength with direction arrows above them, waves as their own
+  strip below
 - A quiet offshore-wind warning, worked out for any coastline in the world
 - Model comparison in place: one wind row per model, toggled on the same table
 - Wind carries a colour scale, hours after dark are shaded, and each day chip
@@ -75,6 +76,21 @@ Every band's ink was checked against its own fill rather than picked by eye —
 worst case 4.86:1, which matters on a phone in direct sun. Every cell still
 prints its number, so colour is never the only channel, and one scale doing one
 job beats colouring every row.
+
+### The graph
+
+Wind is drawn as bars rather than a curve. A bar carries its own colour, and
+colour is how strength is read everywhere else in this app; a thin line at this
+size carries neither well. Above the bars sits the reading the table buries and
+the sea decides everything by — direction — with offshore hours marked, so
+whether a session is on can be answered without reading a number.
+
+Waves get their own strip rather than a second line in the same box, because
+knots and metres are different scales and sharing an axis makes both unreadable.
+The sea is blue for a reason: the wind ramp already owns green through red, and
+the orange first used for waves sat 1.7 deltaE from the 25-30 kt band — close
+enough that on a windy day the sea strip and the wind bars read as the same
+thing.
 
 ### Offshore wind
 

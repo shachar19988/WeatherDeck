@@ -52,10 +52,12 @@ const MODEL_ROW_PREFIX = 'model:';
  * worst case 4.86:1, which matters on a phone in direct sun as much as anywhere.
  * Each cell prints its number too, so colour is never the only channel.
  */
-// Two series, validated against the panel surface in dark mode: lightness band,
-// chroma floor, CVD separation, normal-vision floor and contrast all pass.
-const SERIES_WIND = '#3987e5';
-const SERIES_WAVE = '#d95926';
+// Waves are the graph's only single-colour mark, since wind is drawn straight
+// from the severity ramp. It has to be blue: the ramp already owns green through
+// red, and the orange first tried here sat 1.7 deltaE from the 25-30 kt band —
+// close enough that on a windy day the sea strip and the wind bars read as the
+// same thing. This clears every band by 27 and the panel surface by 6.3:1.
+const SERIES_WAVE = '#6da7ec';
 
 const WIND_SCALE = [
   { limit: 5, fill: '#0a6e3a', ink: '#ffffff' },
@@ -1019,20 +1021,24 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
 }));
 
-const GRAPH = { width: 320, left: 28, right: 8, windTop: 18, windHeight: 82, waveTop: 122, waveHeight: 48 };
+const GRAPH = { width: 320, left: 30, right: 10, arrowY: 13, windTop: 24, windHeight: 84, waveTop: 130, waveHeight: 40 };
 
 function niceCeiling(value: number, step: number, floor: number) {
   return Math.max(floor, Math.ceil(value / step) * step);
 }
 
 /**
- * Wind and waves for the selected day at full hourly resolution — the shape the
- * three-hourly table cannot show: when the wind fills in, how long it holds,
- * when it dies, and whether the sea follows it.
+ * Wind and waves for the selected day, hour by hour.
  *
- * They are two plots sharing one time axis rather than two lines on one, because
- * knots and metres are different scales: on a single axis neither can be read
- * and the crossings mean nothing. The table below is the accessible equivalent.
+ * Wind is bars rather than a curve: a bar carries its own colour, and colour is
+ * how strength is read everywhere else in this app. A thin line at this size
+ * carries neither well. Above them sits the reading the table buries and the sea
+ * decides everything by — direction — with offshore hours marked, so the whole
+ * question of whether a session is on can be answered without reading a number.
+ *
+ * Waves get their own strip below rather than a second line in the same box:
+ * knots and metres are different scales and sharing an axis makes both unreadable.
+ * The table below remains the accessible numeric equivalent.
  */
 function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
   data: Forecast | null;
@@ -1047,51 +1053,46 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
       index,
       time: data?.hourly?.time?.[index],
       wind: reading(data, 'wind_speed_10m', index),
+      direction: reading(data, 'wind_direction_10m', index),
       wave: reading(data, 'wave_height', index),
+      offshore: reading(data, OFFSHORE_KEY, index) === 1,
       night: reading(data, 'is_day', index) === 0,
     }))
     .filter(point => point.wind !== null);
   if (points.length < 2) return null;
 
   const hasWave = points.some(point => point.wave !== null);
-  const height = hasWave ? 196 : 130;
+  const height = hasWave ? 190 : 132;
   const labelY = height - 8;
   const plotWidth = GRAPH.width - GRAPH.left - GRAPH.right;
+  const slot = plotWidth / points.length;
+  const barWidth = Math.max(2, slot - 2);
+  const centre = (position: number) => GRAPH.left + position * slot + slot / 2;
+
   const windCeiling = niceCeiling(Math.max(...points.map(point => point.wind ?? 0), threshold), 5, 10);
   const waveCeiling = niceCeiling(Math.max(...points.map(point => point.wave ?? 0)), 0.5, 1);
-
-  const x = (position: number) => GRAPH.left + (position / (points.length - 1)) * plotWidth;
-  const yWind = (value: number) => GRAPH.windTop + GRAPH.windHeight - (value / windCeiling) * GRAPH.windHeight;
+  const windBase = GRAPH.windTop + GRAPH.windHeight;
+  const yWind = (value: number) => windBase - (value / windCeiling) * GRAPH.windHeight;
   const yWave = (value: number) => GRAPH.waveTop + GRAPH.waveHeight - (value / waveCeiling) * GRAPH.waveHeight;
 
-  const trace = (pick: (point: typeof points[number]) => number | null, project: (value: number) => number) => {
-    const steps: string[] = [];
-    points.forEach((point, position) => {
-      const value = pick(point);
-      if (value === null) return;
-      steps.push(`${steps.length === 0 ? 'M' : 'L'}${x(position).toFixed(1)},${project(value).toFixed(1)}`);
-    });
-    return steps.join(' ');
-  };
-  const area = (pick: (point: typeof points[number]) => number | null, project: (value: number) => number, base: number) => {
-    const path = trace(pick, project);
-    if (!path) return '';
-    return `${path} L${x(points.length - 1).toFixed(1)},${base} L${x(0).toFixed(1)},${base} Z`;
-  };
+  const waveArea = (() => {
+    const drawn = points.map((point, position) => (point.wave === null ? null : `${centre(position).toFixed(1)},${yWave(point.wave).toFixed(1)}`)).filter(Boolean);
+    if (drawn.length < 2) return '';
+    const base = yWave(0).toFixed(1);
+    return `M${centre(0).toFixed(1)},${base} L${drawn.join(' L')} L${centre(points.length - 1).toFixed(1)},${base} Z`;
+  })();
 
   const peakWind = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
-  const peakWindAt = points.indexOf(peakWind);
   const peakWave = Math.max(...points.map(point => point.wave ?? 0));
-  const gridlines = [windCeiling / 2, windCeiling];
   const active = hover === null ? null : points[hover];
-  const bandWidth = Math.max(1, plotWidth / (points.length - 1));
   const nowAt = points.findIndex(point => point.index === nowIndex);
+  const bottom = hasWave ? GRAPH.waveTop + GRAPH.waveHeight : windBase;
+  const arrowEvery = Math.max(1, Math.round(points.length / 8));
 
   const onPointer = (event: React.PointerEvent<SVGSVGElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
     const ratio = ((event.clientX - box.left) / box.width) * GRAPH.width;
-    const position = Math.round(((ratio - GRAPH.left) / plotWidth) * (points.length - 1));
-    setHover(Math.max(0, Math.min(points.length - 1, position)));
+    setHover(Math.max(0, Math.min(points.length - 1, Math.floor((ratio - GRAPH.left) / slot))));
   };
 
   return (
@@ -1102,8 +1103,10 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
           <h2>{fixed(peakWind.wind, 0)} kt{hasWave ? ` · ${peakWave.toFixed(1)} m` : ''}</h2>
         </div>
         <div className="graph-legend">
-          <span><i style={{ background: SERIES_WIND }} />Wind</span>
-          {hasWave && <span><i style={{ background: SERIES_WAVE }} />Waves</span>}
+          <span className="ramp-legend">
+            {WIND_SCALE.map(band => <i key={band.limit} style={{ background: band.fill }} />)}
+            <b>kt</b>
+          </span>
         </div>
       </div>
       <div className="graph-frame">
@@ -1115,58 +1118,61 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
           onPointerLeave={() => setHover(null)}
         >
           {points.map((point, position) => point.night && (
-            <rect
+            <rect key={point.index} x={GRAPH.left + position * slot} y={GRAPH.windTop} width={slot} height={bottom - GRAPH.windTop} fill="#0a1c25" />
+          ))}
+
+          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(windCeiling)} y2={yWind(windCeiling)} stroke="#24414d" strokeWidth="1" />
+          <text x={GRAPH.left - 5} y={yWind(windCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">{windCeiling}</text>
+          <text x={GRAPH.left - 5} y={windBase + 3} textAnchor="end" fill="#89a0aa" fontSize="9">0</text>
+
+          {points.map((point, position) => {
+            const tone = windTone(point.wind ?? 0);
+            const top = yWind(point.wind ?? 0);
+            return (
+              <rect
+                key={point.index}
+                x={GRAPH.left + position * slot + 1}
+                y={top}
+                width={barWidth}
+                height={Math.max(1, windBase - top)}
+                rx="1.5"
+                fill={tone.fill}
+              />
+            );
+          })}
+
+          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(threshold)} y2={yWind(threshold)} stroke="#edf6f7" strokeWidth="1" strokeDasharray="3 3" strokeOpacity="0.65" />
+          <text x={GRAPH.width - GRAPH.right} y={yWind(threshold) - 3} textAnchor="end" fill="#c3d3d9" fontSize="9">alert {threshold}</text>
+
+          {points.map((point, position) => (position % arrowEvery === 0 && point.direction !== null) && (
+            <path
               key={point.index}
-              x={position === 0 ? GRAPH.left : (x(position) + x(position - 1)) / 2}
-              y={GRAPH.windTop}
-              width={bandWidth}
-              height={(hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight) - GRAPH.windTop}
-              fill="#0a1c25"
+              d="M0,-3.8 L2.5,3.2 L0,1.5 L-2.5,3.2 Z"
+              fill={point.offshore ? '#db7548' : '#9fb6bf'}
+              transform={`translate(${centre(position).toFixed(1)},${GRAPH.arrowY}) rotate(${point.direction})`}
             />
           ))}
 
-          {gridlines.map(value => (
-            <g key={value}>
-              <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(value)} y2={yWind(value)} stroke="#24414d" strokeWidth="1" />
-              <text x={GRAPH.left - 5} y={yWind(value) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{Math.round(value)}</text>
-            </g>
-          ))}
-          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(threshold)} y2={yWind(threshold)} stroke="#89a0aa" strokeWidth="1" strokeDasharray="3 3" />
-          <text x={GRAPH.width - GRAPH.right} y={yWind(threshold) - 3} textAnchor="end" fill="#89a0aa" fontSize="7">alert {threshold}</text>
-          <text x={GRAPH.left - 5} y={GRAPH.windTop + 3} textAnchor="end" fill="#5f7681" fontSize="7">kt</text>
-
-          <path d={area(point => point.wind, yWind, yWind(0))} fill={SERIES_WIND} fillOpacity="0.2" />
-          <path d={trace(point => point.wind, yWind)} fill="none" stroke={SERIES_WIND} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          {peakWind.wind !== null && (
-            <text x={x(peakWindAt)} y={yWind(peakWind.wind) - (Math.abs(yWind(peakWind.wind) - yWind(threshold)) < 11 ? 14 : 6)} textAnchor="middle" fill="#edf6f7" fontSize="8" fontWeight="700">
-              {peakWind.wind.toFixed(0)}
-            </text>
-          )}
-
           {hasWave && <>
-            <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWave(waveCeiling)} y2={yWave(waveCeiling)} stroke="#24414d" strokeWidth="1" />
-            <text x={GRAPH.left - 5} y={yWave(waveCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{waveCeiling.toFixed(1)}</text>
-            <text x={GRAPH.left - 5} y={yWave(0) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">0</text>
-            <text x={GRAPH.left - 5} y={GRAPH.waveTop - 5} textAnchor="end" fill="#5f7681" fontSize="7">m</text>
-            <path d={area(point => point.wave, yWave, yWave(0))} fill={SERIES_WAVE} fillOpacity="0.24" />
-            <path d={trace(point => point.wave, yWave)} fill="none" stroke={SERIES_WAVE} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            <path d={waveArea} fill={SERIES_WAVE} fillOpacity="0.3" />
+            <path d={waveArea} fill="none" stroke={SERIES_WAVE} strokeWidth="1.5" strokeLinejoin="round" />
+            <text x={GRAPH.left - 5} y={yWave(waveCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">{waveCeiling.toFixed(1)}</text>
+            <text x={GRAPH.left - 5} y={yWave(0) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">m</text>
           </>}
 
-          {points.map((point, position) => (position % 6 === 0 || position === points.length - 1) && (
-            <text key={point.index} x={x(position)} y={labelY} textAnchor="middle" fill="#89a0aa" fontSize="7">{formatHour(point.time)}</text>
+          {/* No forced label on the last hour: next to the regular one it collides. */}
+          {points.map((point, position) => position % arrowEvery === 0 && (
+            <text key={point.index} x={centre(position)} y={labelY} textAnchor="middle" fill="#89a0aa" fontSize="9">{formatHour(point.time)}</text>
           ))}
 
-          {nowAt >= 0 && (
-            <line x1={x(nowAt)} x2={x(nowAt)} y1={GRAPH.windTop} y2={hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight} stroke="#38e3b1" strokeWidth="1" />
-          )}
-          {active && (
-            <line x1={x(hover ?? 0)} x2={x(hover ?? 0)} y1={GRAPH.windTop} y2={hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.5" />
-          )}
+          {nowAt >= 0 && <line x1={centre(nowAt)} x2={centre(nowAt)} y1={GRAPH.windTop} y2={bottom} stroke="#38e3b1" strokeWidth="1.5" />}
+          {active && <line x1={centre(hover ?? 0)} x2={centre(hover ?? 0)} y1={GRAPH.windTop} y2={bottom} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.55" />}
         </svg>
         {active && (
           <p className="graph-tooltip">
-            <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt
+            <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt {cardinal(active.direction)}
             {active.wave !== null && <> · {active.wave.toFixed(1)} m</>}
+            {active.offshore && <em> offshore</em>}
           </p>
         )}
       </div>
