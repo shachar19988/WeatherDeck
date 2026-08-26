@@ -6,32 +6,45 @@ import android.appwidget.AppWidgetProvider;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.os.Bundle;
+import android.util.Log;
 import android.widget.RemoteViews;
 import java.text.DateFormat;
 import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * The 4x4 home-screen widget: today's temperature, wave and wind ranges over an
- * animated scene that follows the current conditions.
+ * The 2x2 home-screen widget: today's temperature, wind and wave ranges over a
+ * scene coloured by how much wind the day holds.
  *
- * Refresh runs on a background thread held open by goAsync(), so no scheduling
- * library is needed; the system's own updatePeriodMillis drives the cadence.
- * Cached readings render immediately, so the widget is never blank while the
- * network is being waited on.
+ * Deliberately static. A widget that animates has to be redrawn to move, and
+ * paying battery for motion nobody is watching is a bad trade — the colour does
+ * the work instead. The system's own updatePeriodMillis drives a three-hourly
+ * refresh without waking the device, and the app pushes one every time it is
+ * closed, so in practice it is fresh whenever it matters.
+ *
+ * Refresh runs on a background thread held open by goAsync(), so there is no
+ * scheduling library and the project keeps its zero runtime dependencies.
  */
 public class WidgetProvider extends AppWidgetProvider {
     static final String ACTION_REFRESH = "com.weatherdeck.personal.WIDGET_REFRESH";
+    private static final String TAG = "WeatherDeckWidget";
     private static final ExecutorService WORKERS = Executors.newSingleThreadExecutor();
     private static final long STALE_AFTER_MS = 6L * 60L * 60L * 1000L;
+    private static final int FALLBACK_DP = 110;
 
     @Override
     public void onUpdate(Context context, AppWidgetManager manager, int[] widgetIds) {
-        WidgetData data = WidgetData.load(context);
-        for (int widgetId : widgetIds) {
-            manager.updateAppWidget(widgetId, build(context, data));
-        }
+        renderAll(context, manager, widgetIds);
+    }
+
+    @Override
+    public void onAppWidgetOptionsChanged(Context context, AppWidgetManager manager, int widgetId, Bundle options) {
+        super.onAppWidgetOptionsChanged(context, manager, widgetId, options);
+        renderAll(context, manager, new int[]{widgetId});
     }
 
     @Override
@@ -39,50 +52,77 @@ public class WidgetProvider extends AppWidgetProvider {
         super.onReceive(context, intent);
         String action = intent.getAction();
         boolean wanted = AppWidgetManager.ACTION_APPWIDGET_UPDATE.equals(action) || ACTION_REFRESH.equals(action);
-        if (!wanted || ids(context).length == 0) return;
+        if (!wanted) return;
+
+        AppWidgetManager manager = AppWidgetManager.getInstance(context);
+        final int[] widgetIds = manager.getAppWidgetIds(new ComponentName(context, WidgetProvider.class));
+        if (widgetIds.length == 0) return;
 
         final PendingResult pending = goAsync();
         final Context application = context.getApplicationContext();
         WORKERS.execute(() -> {
             try {
                 WidgetData.refresh(application);
-                renderAll(application);
+                renderAll(application, AppWidgetManager.getInstance(application), widgetIds);
+            } catch (Throwable failure) {
+                // Nothing here may be allowed to fail silently: a widget that
+                // renders empty text looks broken and says nothing about why.
+                Log.w(TAG, "Widget refresh failed", failure);
             } finally {
                 pending.finish();
             }
         });
     }
 
-    /** Called by the app when the chosen location changes. */
+    /** Called by the app when the chosen location changes or the app is closed. */
     static void requestRefresh(Context context) {
-        Intent intent = new Intent(context, WidgetProvider.class).setAction(ACTION_REFRESH);
-        context.sendBroadcast(intent);
+        context.sendBroadcast(new Intent(context, WidgetProvider.class).setAction(ACTION_REFRESH));
     }
 
-    private static int[] ids(Context context) {
-        AppWidgetManager manager = AppWidgetManager.getInstance(context);
-        return manager.getAppWidgetIds(new ComponentName(context, WidgetProvider.class));
-    }
-
-    private static void renderAll(Context context) {
-        AppWidgetManager manager = AppWidgetManager.getInstance(context);
+    private static void renderAll(Context context, AppWidgetManager manager, int[] widgetIds) {
         WidgetData data = WidgetData.load(context);
-        for (int widgetId : ids(context)) {
-            manager.updateAppWidget(widgetId, build(context, data));
+        for (int widgetId : widgetIds) {
+            try {
+                manager.updateAppWidget(widgetId, build(context, data, sceneSize(context, manager, widgetId)));
+            } catch (Throwable failure) {
+                Log.w(TAG, "Widget render failed", failure);
+            }
         }
     }
 
-    private static RemoteViews build(Context context, WidgetData data) {
+    /**
+     * Draw at the widget's real pixel size rather than drawing small and letting
+     * the launcher stretch it, which is what makes a gradient look cheap.
+     */
+    private static int sceneSize(Context context, AppWidgetManager manager, int widgetId) {
+        int dp = FALLBACK_DP;
+        try {
+            Bundle options = manager.getAppWidgetOptions(widgetId);
+            if (options != null) {
+                int width = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_WIDTH, 0);
+                int height = options.getInt(AppWidgetManager.OPTION_APPWIDGET_MAX_HEIGHT, 0);
+                dp = Math.max(Math.max(width, height), FALLBACK_DP);
+            }
+        } catch (Throwable ignored) {
+            // Some launchers hand back nothing useful; the fallback covers a 2x2.
+        }
+        float density = context.getResources().getDisplayMetrics().density;
+        return WidgetRenderer.clampSize(Math.round(dp * density));
+    }
+
+    private static RemoteViews build(Context context, WidgetData data, int sceneSize) {
         RemoteViews views = new RemoteViews(context.getPackageName(), R.layout.widget);
-        int[] frames = {R.id.widget_frame_0, R.id.widget_frame_1, R.id.widget_frame_2};
-        for (int i = 0; i < frames.length && i < WidgetRenderer.FRAMES; i++) {
-            views.setImageViewBitmap(frames[i], WidgetRenderer.frame(data, i));
+        try {
+            Bitmap scene = WidgetRenderer.scene(data, sceneSize);
+            views.setImageViewBitmap(R.id.widget_scene, scene);
+        } catch (Throwable failure) {
+            // The layout's own background keeps the widget legible without art.
+            Log.w(TAG, "Scene render failed", failure);
         }
 
         views.setTextViewText(R.id.widget_place, data.place);
         views.setTextViewText(R.id.widget_temp, range(data.tempLow, data.tempHigh, "°", 0));
-        views.setTextViewText(R.id.widget_wind, range(data.windLow, data.windHigh, " kt", 0));
-        views.setTextViewText(R.id.widget_wave, range(data.waveLow, data.waveHigh, " m", 1));
+        views.setTextViewText(R.id.widget_sea, seaLine(data));
         views.setTextViewText(R.id.widget_updated, updatedLabel(data));
 
         Intent open = new Intent(context, MainActivity.class)
@@ -92,16 +132,22 @@ public class WidgetProvider extends AppWidgetProvider {
         return views;
     }
 
+    private static String seaLine(WidgetData data) {
+        String wind = range(data.windLow, data.windHigh, " kt", 0);
+        String wave = range(data.waveLow, data.waveHigh, " m", 1);
+        return "—".equals(wave) ? wind : wind + "  ·  " + wave;
+    }
+
     /** Missing readings stay missing — the widget never invents a number. */
     private static String range(double low, double high, String unit, int decimals) {
         if (!WidgetData.has(low) || !WidgetData.has(high)) return "—";
-        String from = String.format(java.util.Locale.US, "%." + decimals + "f", low);
-        String to = String.format(java.util.Locale.US, "%." + decimals + "f", high);
-        return from.equals(to) ? from + unit : from + "–" + to + unit;
+        String from = String.format(Locale.US, "%." + decimals + "f", low);
+        String to = String.format(Locale.US, "%." + decimals + "f", high);
+        return from.equals(to) ? from + unit : from + "-" + to + unit;
     }
 
     private static String updatedLabel(WidgetData data) {
-        if (data.updatedAt <= 0L) return "No reading yet";
+        if (data.updatedAt <= 0L) return "No reading yet — tap to open";
         String time = DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(data.updatedAt));
         boolean stale = System.currentTimeMillis() - data.updatedAt > STALE_AFTER_MS;
         return (stale ? "Last reading " : "Updated ") + time;

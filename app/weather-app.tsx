@@ -24,7 +24,7 @@ const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
 const DEFAULT_LOCATION: Location = { name: 'Haifa', country: 'Israel', latitude: 32.794, longitude: 34.9896 };
 const WEATHER_VARS = 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cape,is_day';
 const LONG_RANGE_VARS = 'temperature_2m,temperature_2m_spread,relative_humidity_2m,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_speed_10m_spread,wind_direction_10m,wind_gusts_10m';
-const MARINE_VARS = 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
+const MARINE_VARS = 'wave_height,wave_direction,wave_period,sea_surface_temperature,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
 
 const SPREAD_SUFFIX = '__spread';
 const COUNT_SUFFIX = '__models';
@@ -32,32 +32,39 @@ const CONSENSUS_KEYS = ['temperature_2m', 'relative_humidity_2m', 'precipitation
 // Bearings cannot be averaged arithmetically: the mean of 350 and 10 is 180,
 // which points the opposite way. They are averaged as unit vectors instead.
 const CIRCULAR_KEYS = new Set(['wind_direction_10m']);
+
+const OFFSHORE_KEY = 'offshore';
+const SHORE_PREFIX = 'weatherdeck:shore:';
+const SHORE_SECTORS = 16;
+const SHORE_RINGS_KM = [5, 12];
+type ShoreMask = { sectors: boolean[]; water: boolean };
 const MARINE_KEYS = MARINE_VARS.split(',');
 const MODEL_ROW_PREFIX = 'model:';
 
 /**
- * Wind is the variable this app exists for, so it is the one that gets a colour
- * scale — a single documented blue ramp, dark-anchored so calm air recedes into
- * the panel and a gale reads brightest. One sequential encoding doing one job
- * beats colouring every row; every cell still shows its number, so colour is
- * never the only channel.
+ * Wind bands, green through yellow to red.
  *
- * Checked: lightness is monotone across the ramp, every  adjacent step differs by
- * dL >= 0.09, and each band's ink clears 4.5:1 against its own fill.
+ * A severity scale rather than a plain magnitude one: on a board or at a helm,
+ * 8 kt and 28 kt are not two amounts of the same thing, they are two different
+ * days, and green-to-red is the convention that already means that.
+ *
+ * Every band's ink was checked against its own fill rather than picked by eye —
+ * worst case 4.86:1, which matters on a phone in direct sun as much as anywhere.
+ * Each cell prints its number too, so colour is never the only channel.
  */
 // Two series, validated against the panel surface in dark mode: lightness band,
 // chroma floor, CVD separation, normal-vision floor and contrast all pass.
 const SERIES_WIND = '#3987e5';
-const SERIES_GUST = '#d95926';
+const SERIES_WAVE = '#d95926';
 
 const WIND_SCALE = [
-  { limit: 5, fill: '#0d366b', ink: '#edf6f7' },
-  { limit: 10, fill: '#184f95', ink: '#edf6f7' },
-  { limit: 15, fill: '#256abf', ink: '#edf6f7' },
-  { limit: 20, fill: '#3987e5', ink: '#062019' },
-  { limit: 25, fill: '#6da7ec', ink: '#062019' },
-  { limit: 30, fill: '#9ec5f4', ink: '#062019' },
-  { limit: Infinity, fill: '#cde2fb', ink: '#062019' },
+  { limit: 5, fill: '#0a6e3a', ink: '#ffffff' },
+  { limit: 10, fill: '#2f9412', ink: '#12100a' },
+  { limit: 15, fill: '#8ab800', ink: '#12100a' },
+  { limit: 20, fill: '#f0c000', ink: '#12100a' },
+  { limit: 25, fill: '#f28a00', ink: '#12100a' },
+  { limit: 30, fill: '#e2551c', ink: '#12100a' },
+  { limit: Infinity, fill: '#c81e1e', ink: '#ffffff' },
 ];
 function windTone(value: number) {
   return WIND_SCALE.find(band => value < band.limit) ?? WIND_SCALE[WIND_SCALE.length - 1];
@@ -314,6 +321,85 @@ function findWindAlert(data: Forecast | null, from: number, threshold: number, k
   return null;
 }
 
+/** Great-circle offset, used to lay a ring of probe points around a spot. */
+function destination(latitude: number, longitude: number, bearing: number, km: number) {
+  const radius = 6371;
+  const angle = (bearing * Math.PI) / 180;
+  const lat = (latitude * Math.PI) / 180;
+  const lon = (longitude * Math.PI) / 180;
+  const distance = km / radius;
+  const nextLat = Math.asin(Math.sin(lat) * Math.cos(distance) + Math.cos(lat) * Math.sin(distance) * Math.cos(angle));
+  const nextLon = lon + Math.atan2(
+    Math.sin(angle) * Math.sin(distance) * Math.cos(lat),
+    Math.cos(distance) - Math.sin(lat) * Math.sin(nextLat),
+  );
+  return [(nextLat * 180) / Math.PI, (nextLon * 180) / Math.PI] as const;
+}
+function sectorOf(bearing: number) {
+  return Math.round((((bearing % 360) + 360) % 360) / (360 / SHORE_SECTORS)) % SHORE_SECTORS;
+}
+function shoreKey(location: Location) {
+  return `${SHORE_PREFIX}${location.latitude.toFixed(2)},${location.longitude.toFixed(2)}`;
+}
+
+/**
+ * Works out which way the open water lies, anywhere in the world, by asking
+ * Open-Meteo's elevation endpoint about a ring of points around the spot: sea
+ * reads as zero. The marine endpoint is no good for this — it snaps to a coarse
+ * grid and answers for inland points near the coast.
+ *
+ * The result is kept as a 16-sector water mask rather than reduced to a single
+ * bearing, because on a bay the water wraps around and one average angle
+ * flattens exactly the detail that matters.
+ */
+async function fetchShore(location: Location, signal: AbortSignal): Promise<ShoreMask | null> {
+  const latitudes: number[] = [];
+  const longitudes: number[] = [];
+  for (const km of SHORE_RINGS_KM) {
+    for (let sector = 0; sector < SHORE_SECTORS; sector += 1) {
+      const [lat, lon] = destination(location.latitude, location.longitude, (sector * 360) / SHORE_SECTORS, km);
+      latitudes.push(lat);
+      longitudes.push(lon);
+    }
+  }
+  const json = await fetchJson<{ elevation?: (number | null)[] }>(
+    `https://api.open-meteo.com/v1/elevation?latitude=${latitudes.map(v => v.toFixed(5)).join(',')}&longitude=${longitudes.map(v => v.toFixed(5)).join(',')}`,
+    signal,
+  );
+  if (!json?.elevation?.length) return null;
+  const sectors = new Array<boolean>(SHORE_SECTORS).fill(false);
+  json.elevation.forEach((value, index) => {
+    if (typeof value === 'number' && Number.isFinite(value) && value <= 1) sectors[index % SHORE_SECTORS] = true;
+  });
+  return { sectors, water: sectors.some(Boolean) };
+}
+
+/**
+ * wind_direction_10m is the direction the wind blows *from*. Offshore means it
+ * arrives over land and leaves over water — the case that carries a paddler out
+ * to sea faster than they can come back.
+ */
+function isOffshore(mask: ShoreMask | null, windFrom: number | null) {
+  if (!mask?.water || windFrom === null) return false;
+  const from = sectorOf(windFrom);
+  const before = (from + SHORE_SECTORS - 1) % SHORE_SECTORS;
+  const after = (from + 1) % SHORE_SECTORS;
+  // Requiring a neighbouring sector to agree keeps a wind sitting on a sector
+  // boundary from flipping the warning on and off between runs, and keeps a lone
+  // land cell in open water from raising one at all. A warning that cries wolf
+  // is worse than no warning.
+  const fromLand = !mask.sectors[from] && (!mask.sectors[before] || !mask.sectors[after]);
+  return fromLand && mask.sectors[sectorOf(windFrom + 180)];
+}
+function withOffshore(base: Forecast | null, mask: ShoreMask | null): Forecast | null {
+  if (!base) return null;
+  if (!mask?.water) return base;
+  const hourly: Record<string, Series | string[]> = { ...base.hourly };
+  hourly[OFFSHORE_KEY] = base.hourly.time.map((_, index) =>
+    (isOffshore(mask, reading(base, 'wind_direction_10m', index)) ? 1 : null));
+  return { ...base, hourly: hourly as Hourly };
+}
+
 async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T | null> {
   try {
     const response = await fetch(url, { signal });
@@ -345,6 +431,7 @@ export default function WeatherApp() {
   const [selectedDay, setSelectedDay] = useState(0);
   const [compareModels, setCompareModels] = useState(false);
   const [now, setNow] = useState(0);
+  const [shore, setShore] = useState<ShoreMask | null>(null);
 
   const searchInput = useRef<HTMLInputElement | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -376,6 +463,28 @@ export default function WeatherApp() {
 
   useEffect(() => {
     writeStorage(LOCATION_KEY, JSON.stringify(location));
+  }, [location]);
+
+  // The coastline does not move, so this runs once per spot and is then cached.
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.resolve().then(async () => {
+      const cached = readStorage(shoreKey(location));
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as ShoreMask;
+          if (Array.isArray(parsed?.sectors) && parsed.sectors.length === SHORE_SECTORS) {
+            setShore(parsed);
+            return;
+          }
+        } catch { /* fall through and probe again */ }
+      }
+      const mask = await fetchShore(location, controller.signal);
+      if (controller.signal.aborted) return;
+      setShore(mask);
+      if (mask) writeStorage(shoreKey(location), JSON.stringify(mask));
+    });
+    return () => controller.abort();
   }, [location]);
 
   const load = useCallback(async (signal: AbortSignal) => {
@@ -513,8 +622,9 @@ export default function WeatherApp() {
     const withSea = withSeries(forecastData, marine, MARINE_KEYS);
     // The ensemble carries no daylight flag; borrow it from any operational model.
     const lit = hasSeries(withSea, 'is_day') ? withSea : withSeries(withSea, current ?? undefined, ['is_day']);
-    return compareModels ? withModelWinds(lit, forecasts) : lit;
-  }, [forecastData, marine, current, forecasts, compareModels]);
+    const flagged = withOffshore(lit, shore);
+    return compareModels ? withModelWinds(flagged, forecasts) : flagged;
+  }, [forecastData, marine, current, forecasts, compareModels, shore]);
   const tableRows = useMemo(() => [
     ...WEATHER_ROWS,
     ...(activeModel === 'MEAN' && !usingExtended ? AGREEMENT_ROWS : []),
@@ -713,7 +823,7 @@ export default function WeatherApp() {
           <small>{sourceDetail}</small>
         </section>
 
-        <WindGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
+        <ConditionsGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
 
         <ReadingTable
           data={tableData}
@@ -833,9 +943,22 @@ function windCell(data: Forecast | null, key: string, index: number) {
 function arrowCell(data: Forecast | null, key: string, index: number) {
   return numberCell(data, key, index, value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>);
 }
+function anyOffshore(data: Forecast | null, indexes: number[]) {
+  return indexes.some(index => reading(data, OFFSHORE_KEY, index) === 1);
+}
 
 const WEATHER_ROWS: Row[] = [
-  { key: 'wind_direction_10m', group: 'AIR', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wind_direction_10m', index) },
+  {
+    key: 'wind_direction_10m',
+    group: 'AIR',
+    label: 'Direction',
+    unit: '',
+    render: (data, index) => numberCell(data, 'wind_direction_10m', index, value => (
+      <span className={`dir-cell${reading(data, OFFSHORE_KEY, index) === 1 ? ' offshore' : ''}`}>
+        <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>
+      </span>
+    )),
+  },
   { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
   { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
   { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
@@ -867,8 +990,20 @@ const AGREEMENT_ROWS: Row[] = [
 
 const MARINE_ROWS: Row[] = [
   { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
-  { key: 'wave_height', group: 'SEA', label: 'Waves', unit: 'm', render: (data, index) => numberCell(data, 'wave_height', index, value => value.toFixed(1)) },
+  {
+    key: 'wave_height',
+    group: 'SEA',
+    label: 'Waves',
+    unit: 'm',
+    // The bar is a second reading of the same number, not a replacement for it.
+    render: (data, index) => numberCell(data, 'wave_height', index, value => (
+      <span className="wave-chip" style={{ '--fill': `${Math.min(100, (value / 3) * 100).toFixed(0)}%` } as CSSProperties}>
+        {value.toFixed(1)}
+      </span>
+    )),
+  },
   { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
+  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', render: (data, index) => numberCell(data, 'sea_surface_temperature', index, value => <span className="temp-pill water">{Math.round(value)}°</span>) },
   { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
   { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
   { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
@@ -884,15 +1019,22 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
 }));
 
-const GRAPH = { width: 320, height: 128, left: 28, right: 8, top: 12, bottom: 20 };
+const GRAPH = { width: 320, left: 28, right: 8, windTop: 18, windHeight: 82, waveTop: 122, waveHeight: 48 };
+
+function niceCeiling(value: number, step: number, floor: number) {
+  return Math.max(floor, Math.ceil(value / step) * step);
+}
 
 /**
- * Wind over the whole selected day at full hourly resolution — the shape the
- * three-hourly table cannot show: when the wind fills in, how long it holds and
- * when it dies. Sustained wind is the filled band; gusts are the envelope above
- * it. The table below is the accessible equivalent of this chart.
+ * Wind and waves for the selected day at full hourly resolution — the shape the
+ * three-hourly table cannot show: when the wind fills in, how long it holds,
+ * when it dies, and whether the sea follows it.
+ *
+ * They are two plots sharing one time axis rather than two lines on one, because
+ * knots and metres are different scales: on a single axis neither can be read
+ * and the crossings mean nothing. The table below is the accessible equivalent.
  */
-function WindGraph({ data, indexes, nowIndex, threshold }: {
+function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
   data: Forecast | null;
   indexes: number[];
   nowIndex: number;
@@ -905,37 +1047,45 @@ function WindGraph({ data, indexes, nowIndex, threshold }: {
       index,
       time: data?.hourly?.time?.[index],
       wind: reading(data, 'wind_speed_10m', index),
-      gust: reading(data, 'wind_gusts_10m', index),
+      wave: reading(data, 'wave_height', index),
       night: reading(data, 'is_day', index) === 0,
     }))
     .filter(point => point.wind !== null);
   if (points.length < 2) return null;
 
-  const peak = Math.max(...points.map(point => Math.max(point.wind ?? 0, point.gust ?? 0)), threshold);
-  const ceiling = Math.max(10, Math.ceil(peak / 5) * 5);
+  const hasWave = points.some(point => point.wave !== null);
+  const height = hasWave ? 196 : 130;
+  const labelY = height - 8;
   const plotWidth = GRAPH.width - GRAPH.left - GRAPH.right;
-  const plotHeight = GRAPH.height - GRAPH.top - GRAPH.bottom;
-  const x = (position: number) => GRAPH.left + (points.length === 1 ? plotWidth / 2 : (position / (points.length - 1)) * plotWidth);
-  const y = (value: number) => GRAPH.top + plotHeight - (value / ceiling) * plotHeight;
+  const windCeiling = niceCeiling(Math.max(...points.map(point => point.wind ?? 0), threshold), 5, 10);
+  const waveCeiling = niceCeiling(Math.max(...points.map(point => point.wave ?? 0)), 0.5, 1);
 
-  const line = (pick: (point: typeof points[number]) => number | null) => points
-    .map((point, position) => {
+  const x = (position: number) => GRAPH.left + (position / (points.length - 1)) * plotWidth;
+  const yWind = (value: number) => GRAPH.windTop + GRAPH.windHeight - (value / windCeiling) * GRAPH.windHeight;
+  const yWave = (value: number) => GRAPH.waveTop + GRAPH.waveHeight - (value / waveCeiling) * GRAPH.waveHeight;
+
+  const trace = (pick: (point: typeof points[number]) => number | null, project: (value: number) => number) => {
+    const steps: string[] = [];
+    points.forEach((point, position) => {
       const value = pick(point);
-      return value === null ? null : `${position === 0 ? 'M' : 'L'}${x(position).toFixed(1)},${y(value).toFixed(1)}`;
-    })
-    .filter(Boolean)
-    .join(' ');
-  const windArea = `${line(point => point.wind)} L${x(points.length - 1).toFixed(1)},${y(0).toFixed(1)} L${x(0).toFixed(1)},${y(0).toFixed(1)} Z`;
+      if (value === null) return;
+      steps.push(`${steps.length === 0 ? 'M' : 'L'}${x(position).toFixed(1)},${project(value).toFixed(1)}`);
+    });
+    return steps.join(' ');
+  };
+  const area = (pick: (point: typeof points[number]) => number | null, project: (value: number) => number, base: number) => {
+    const path = trace(pick, project);
+    if (!path) return '';
+    return `${path} L${x(points.length - 1).toFixed(1)},${base} L${x(0).toFixed(1)},${base} Z`;
+  };
 
-  const strongest = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
-  const strongestAt = points.indexOf(strongest);
-  const strongestGust = Math.max(...points.map(point => point.gust ?? 0));
-  // Nudge the peak label clear of the alert line when they land on each other.
-  const peakLabelY = strongest.wind === null
-    ? 0
-    : y(strongest.wind) - (Math.abs(y(strongest.wind) - y(threshold)) < 11 ? 14 : 6);
-  const gridlines = [0, ceiling / 2, ceiling];
+  const peakWind = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
+  const peakWindAt = points.indexOf(peakWind);
+  const peakWave = Math.max(...points.map(point => point.wave ?? 0));
+  const gridlines = [windCeiling / 2, windCeiling];
   const active = hover === null ? null : points[hover];
+  const bandWidth = Math.max(1, plotWidth / (points.length - 1));
+  const nowAt = points.findIndex(point => point.index === nowIndex);
 
   const onPointer = (event: React.PointerEvent<SVGSVGElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
@@ -948,19 +1098,19 @@ function WindGraph({ data, indexes, nowIndex, threshold }: {
     <section className="graph-card">
       <div className="section-title">
         <div>
-          <p className="eyebrow">WIND THROUGH THE DAY</p>
-          <h2>{fixed(strongest.wind, 0)} kt{strongestGust > 0 ? ` · gusts ${strongestGust.toFixed(0)}` : ''}</h2>
+          <p className="eyebrow">THROUGH THE DAY</p>
+          <h2>{fixed(peakWind.wind, 0)} kt{hasWave ? ` · ${peakWave.toFixed(1)} m` : ''}</h2>
         </div>
         <div className="graph-legend">
           <span><i style={{ background: SERIES_WIND }} />Wind</span>
-          <span><i style={{ background: SERIES_GUST }} />Gusts</span>
+          {hasWave && <span><i style={{ background: SERIES_WAVE }} />Waves</span>}
         </div>
       </div>
       <div className="graph-frame">
         <svg
-          viewBox={`0 0 ${GRAPH.width} ${GRAPH.height}`}
+          viewBox={`0 0 ${GRAPH.width} ${height}`}
           role="img"
-          aria-label={`Wind through the day, peaking at ${fixed(strongest.wind, 0)} knots with gusts to ${strongestGust.toFixed(0)}. The table below carries the same readings.`}
+          aria-label={`Wind and waves through the day. Wind peaks at ${fixed(peakWind.wind, 0)} knots${hasWave ? `, waves at ${peakWave.toFixed(1)} metres` : ''}. The table below carries the same readings.`}
           onPointerMove={onPointer}
           onPointerLeave={() => setHover(null)}
         >
@@ -968,54 +1118,55 @@ function WindGraph({ data, indexes, nowIndex, threshold }: {
             <rect
               key={point.index}
               x={position === 0 ? GRAPH.left : (x(position) + x(position - 1)) / 2}
-              y={GRAPH.top}
-              width={Math.max(1, plotWidth / (points.length - 1))}
-              height={plotHeight}
+              y={GRAPH.windTop}
+              width={bandWidth}
+              height={(hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight) - GRAPH.windTop}
               fill="#0a1c25"
             />
           ))}
+
           {gridlines.map(value => (
             <g key={value}>
-              <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(value)} y2={y(value)} stroke="#24414d" strokeWidth="1" />
-              <text x={GRAPH.left - 5} y={y(value) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{Math.round(value)}</text>
+              <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(value)} y2={yWind(value)} stroke="#24414d" strokeWidth="1" />
+              <text x={GRAPH.left - 5} y={yWind(value) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{Math.round(value)}</text>
             </g>
           ))}
-          <line
-            x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(threshold)} y2={y(threshold)}
-            stroke="#89a0aa" strokeWidth="1" strokeDasharray="3 3"
-          />
-          <text x={GRAPH.width - GRAPH.right} y={y(threshold) - 3} textAnchor="end" fill="#89a0aa" fontSize="7">alert {threshold}</text>
+          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(threshold)} y2={yWind(threshold)} stroke="#89a0aa" strokeWidth="1" strokeDasharray="3 3" />
+          <text x={GRAPH.width - GRAPH.right} y={yWind(threshold) - 3} textAnchor="end" fill="#89a0aa" fontSize="7">alert {threshold}</text>
+          <text x={GRAPH.left - 5} y={GRAPH.windTop + 3} textAnchor="end" fill="#5f7681" fontSize="7">kt</text>
 
-          <path d={windArea} fill={SERIES_WIND} fillOpacity="0.22" />
-          <path d={line(point => point.gust)} fill="none" stroke={SERIES_GUST} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          <path d={line(point => point.wind)} fill="none" stroke={SERIES_WIND} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          <path d={area(point => point.wind, yWind, yWind(0))} fill={SERIES_WIND} fillOpacity="0.2" />
+          <path d={trace(point => point.wind, yWind)} fill="none" stroke={SERIES_WIND} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          {peakWind.wind !== null && (
+            <text x={x(peakWindAt)} y={yWind(peakWind.wind) - (Math.abs(yWind(peakWind.wind) - yWind(threshold)) < 11 ? 14 : 6)} textAnchor="middle" fill="#edf6f7" fontSize="8" fontWeight="700">
+              {peakWind.wind.toFixed(0)}
+            </text>
+          )}
+
+          {hasWave && <>
+            <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWave(waveCeiling)} y2={yWave(waveCeiling)} stroke="#24414d" strokeWidth="1" />
+            <text x={GRAPH.left - 5} y={yWave(waveCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{waveCeiling.toFixed(1)}</text>
+            <text x={GRAPH.left - 5} y={yWave(0) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">0</text>
+            <text x={GRAPH.left - 5} y={GRAPH.waveTop - 5} textAnchor="end" fill="#5f7681" fontSize="7">m</text>
+            <path d={area(point => point.wave, yWave, yWave(0))} fill={SERIES_WAVE} fillOpacity="0.24" />
+            <path d={trace(point => point.wave, yWave)} fill="none" stroke={SERIES_WAVE} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+          </>}
 
           {points.map((point, position) => (position % 6 === 0 || position === points.length - 1) && (
-            <text key={point.index} x={x(position)} y={GRAPH.height - 6} textAnchor="middle" fill="#89a0aa" fontSize="7">
-              {formatHour(point.time)}
-            </text>
+            <text key={point.index} x={x(position)} y={labelY} textAnchor="middle" fill="#89a0aa" fontSize="7">{formatHour(point.time)}</text>
           ))}
-          {strongest.wind !== null && (
-            <text x={x(strongestAt)} y={peakLabelY} textAnchor="middle" fill="#edf6f7" fontSize="8" fontWeight="700">
-              {strongest.wind.toFixed(0)}
-            </text>
-          )}
-          {indexes.includes(nowIndex) && (
-            <line
-              x1={x(points.findIndex(point => point.index === nowIndex))}
-              x2={x(points.findIndex(point => point.index === nowIndex))}
-              y1={GRAPH.top} y2={GRAPH.top + plotHeight}
-              stroke="#38e3b1" strokeWidth="1"
-            />
+
+          {nowAt >= 0 && (
+            <line x1={x(nowAt)} x2={x(nowAt)} y1={GRAPH.windTop} y2={hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight} stroke="#38e3b1" strokeWidth="1" />
           )}
           {active && (
-            <line x1={x(hover ?? 0)} x2={x(hover ?? 0)} y1={GRAPH.top} y2={GRAPH.top + plotHeight} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.5" />
+            <line x1={x(hover ?? 0)} x2={x(hover ?? 0)} y1={GRAPH.windTop} y2={hasWave ? GRAPH.waveTop + GRAPH.waveHeight : GRAPH.windTop + GRAPH.windHeight} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.5" />
           )}
         </svg>
         {active && (
           <p className="graph-tooltip">
             <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt
-            {active.gust !== null && <> · gusts {active.gust.toFixed(1)}</>}
+            {active.wave !== null && <> · {active.wave.toFixed(1)} m</>}
           </p>
         )}
       </div>
@@ -1087,6 +1238,12 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
       )}
       {rows.length > 0 && missingCopy.length > 0 && (
         <p className="data-note">For this day: {missingCopy.join('; ')}.</p>
+      )}
+      {rows.length > 0 && anyOffshore(data, indexes) && (
+        <p className="data-note offshore-note">
+          <span className="offshore-dot" aria-hidden="true" />
+          Offshore — the wind is blowing from the shore out to sea.
+        </p>
       )}
       {footnote && rows.some(row => row.group === footnote.group) && (
         <p className="data-note">{footnote.text}</p>

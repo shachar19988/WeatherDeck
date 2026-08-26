@@ -44,6 +44,7 @@ public class MainActivity extends Activity {
     private static final int LOCATION_REQUEST = 100;
     private static final int READY_POLL_MS = 100;
     private static final int READY_ATTEMPTS = 40;
+    private static final long WIDGET_REFRESH_AFTER_MS = 30L * 60L * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView webView;
@@ -261,6 +262,9 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         syncWidgetLocation();
+        // Closing the app is the cheapest moment to top the widget up, but only
+        // if what it holds has actually gone stale.
+        if (WidgetData.olderThan(this, WIDGET_REFRESH_AFTER_MS)) WidgetProvider.requestRefresh(this);
     }
 
     private void showFailure(String message) {
