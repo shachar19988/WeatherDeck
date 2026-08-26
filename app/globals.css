@@ -57,3 +57,15 @@
 .offshore-dot{width:5px;height:5px;min-width:5px;border-radius:50%;background:var(--orange)}
 .wave-chip{display:block;padding:6px 3px;border-radius:6px;font-weight:800;font-size:12px;line-height:1.1;background:linear-gradient(90deg,#6da7ec3d var(--fill,0%),transparent var(--fill,0%))}
 .temp-pill.water{background:#1d6f7d}
+.table-label{flex-direction:column;align-items:flex-start!important;gap:2px}
+.label-text{display:block}
+.sparkline{width:40px;height:14px;opacity:.9}
+.sparkline polyline{stroke:#6f8791}
+.sparkline.lead polyline{stroke:var(--accent)}
+.sparkline.normal polyline{stroke:#8fb0bc}
+.table-cell.lead{font-size:13px;font-weight:800;color:#f2fafc}
+.table-cell.reference{font-size:11px;color:#8ba1aa}
+.table-label.lead b{color:#edf6f7}
+.table-label.reference b{color:#7e949d}
+.table-head.current,.table-cell.current{box-shadow:inset 1px 0 0 var(--accent),inset -1px 0 0 var(--accent)}
+.table-head.current{color:var(--accent);font-weight:900}

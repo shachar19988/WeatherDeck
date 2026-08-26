@@ -830,6 +830,8 @@ export default function WeatherApp() {
         <ReadingTable
           data={tableData}
           indexes={forecastIndexes}
+          dayIndexes={weatherDayIndexes}
+          nowIndex={dataNowIndex}
           rows={tableRows}
           eyebrow="DETAILED FORECAST"
           title={`${dayHeading} · every 3 hours`}
@@ -929,7 +931,14 @@ export default function WeatherApp() {
 
 /* ---------- views ---------- */
 
-type Row = { key: string; group: string; label: string; unit: string; render: (data: Forecast | null, index: number) => ReactNode };
+/**
+ * `tier` is what makes the table scannable. Everything used to carry the same
+ * visual weight, so there was nowhere for the eye to land. Now the readings a
+ * session turns on are set loud, the supporting ones normal, and the reference
+ * ones recede — the numbers are all still there, they just stop competing.
+ */
+type Tier = 'lead' | 'normal' | 'reference';
+type Row = { key: string; group: string; label: string; unit: string; tier: Tier; render: (data: Forecast | null, index: number) => ReactNode };
 
 const EMPTY_CELL = <span className="table-empty">—</span>;
 function numberCell(data: Forecast | null, key: string, index: number, format: (value: number) => ReactNode) {
@@ -945,6 +954,33 @@ function windCell(data: Forecast | null, key: string, index: number) {
 function arrowCell(data: Forecast | null, key: string, index: number) {
   return numberCell(data, key, index, value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>);
 }
+/**
+ * The day's shape for one row, beside its label. Reading eight numbers to work
+ * out whether something is rising or falling is the slow part of a table; this
+ * answers it before the numbers are read at all.
+ *
+ * Scaled to the row's own range, so it shows shape, not magnitude — the numbers
+ * carry magnitude.
+ */
+function Sparkline({ data, seriesKey, indexes, tier }: { data: Forecast | null; seriesKey: string; indexes: number[]; tier: Tier }) {
+  const values = indexes.map(index => reading(data, seriesKey, index));
+  const known = values.filter((value): value is number => value !== null);
+  if (known.length < 3) return null;
+  const low = Math.min(...known);
+  const span = Math.max(...known) - low || 1;
+  const points = values
+    .map((value, position) => (value === null
+      ? null
+      : `${(1 + (position / Math.max(1, values.length - 1)) * 38).toFixed(1)},${(12.5 - ((value - low) / span) * 11).toFixed(1)}`))
+    .filter((value): value is string => value !== null);
+  if (points.length < 3) return null;
+  return (
+    <svg className={`sparkline ${tier}`} viewBox="0 0 40 14" aria-hidden="true" focusable="false">
+      <polyline points={points.join(' ')} fill="none" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function anyOffshore(data: Forecast | null, indexes: number[]) {
   return indexes.some(index => reading(data, OFFSHORE_KEY, index) === 1);
 }
@@ -955,18 +991,19 @@ const WEATHER_ROWS: Row[] = [
     group: 'AIR',
     label: 'Direction',
     unit: '',
+    tier: 'lead',
     render: (data, index) => numberCell(data, 'wind_direction_10m', index, value => (
       <span className={`dir-cell${reading(data, OFFSHORE_KEY, index) === 1 ? ' offshore' : ''}`}>
         <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>
       </span>
     )),
   },
-  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
-  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
-  { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
-  { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
-  { key: 'precipitation', group: 'AIR', label: 'Rain', unit: 'mm', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
-  { key: 'cloud_cover', group: 'AIR', label: 'Clouds', unit: '%', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
+  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
+  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
+  { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', tier: 'normal', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
+  { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', tier: 'reference', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
+  { key: 'precipitation', group: 'AIR', label: 'Rain', unit: 'mm', tier: 'normal', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
+  { key: 'cloud_cover', group: 'AIR', label: 'Clouds', unit: '%', tier: 'reference', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
 ];
 
 // Shown only for the mean: a mean is worth no more than the agreement behind
@@ -977,6 +1014,7 @@ const AGREEMENT_ROWS: Row[] = [
     group: 'MODEL AGREEMENT',
     label: 'Wind spread',
     unit: 'kt',
+    tier: 'normal',
     render: (data, index) => numberCell(data, 'wind_speed_10m' + SPREAD_SUFFIX, index,
       value => <span className={`agreement ${value < 3 ? 'good' : value < 6 ? 'fair' : 'poor'}`}>{value.toFixed(1)}</span>),
   },
@@ -985,18 +1023,20 @@ const AGREEMENT_ROWS: Row[] = [
     group: 'MODEL AGREEMENT',
     label: 'Models used',
     unit: `of ${MODEL_KEYS.length}`,
+    tier: 'reference',
     render: (data, index) => numberCell(data, 'wind_speed_10m' + COUNT_SUFFIX, index, value => String(value)),
   },
 ];
 
 
 const MARINE_ROWS: Row[] = [
-  { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
+  { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', tier: 'normal', render: (data, index) => arrowCell(data, 'wave_direction', index) },
   {
     key: 'wave_height',
     group: 'SEA',
     label: 'Waves',
     unit: 'm',
+    tier: 'lead',
     // The bar is a second reading of the same number, not a replacement for it.
     render: (data, index) => numberCell(data, 'wave_height', index, value => (
       <span className="wave-chip" style={{ '--fill': `${Math.min(100, (value / 3) * 100).toFixed(0)}%` } as CSSProperties}>
@@ -1004,13 +1044,13 @@ const MARINE_ROWS: Row[] = [
       </span>
     )),
   },
-  { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
-  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', render: (data, index) => numberCell(data, 'sea_surface_temperature', index, value => <span className="temp-pill water">{Math.round(value)}°</span>) },
-  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
-  { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
-  { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
-  { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
-  { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
+  { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', tier: 'lead', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
+  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index) => numberCell(data, 'sea_surface_temperature', index, value => <span className="temp-pill water">{Math.round(value)}°</span>) },
+  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
+  { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
+  { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', tier: 'normal', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
+  { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', tier: 'reference', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
+  { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', tier: 'reference', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
 ];
 
 const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
@@ -1018,6 +1058,7 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   group: 'MODELS · WIND',
   label: model,
   unit: MODEL_META[model].provider,
+  tier: 'normal',
   render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
 }));
 
@@ -1055,6 +1096,7 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
       wind: reading(data, 'wind_speed_10m', index),
       direction: reading(data, 'wind_direction_10m', index),
       wave: reading(data, 'wave_height', index),
+      period: reading(data, 'wave_period', index),
       offshore: reading(data, OFFSHORE_KEY, index) === 1,
       night: reading(data, 'is_day', index) === 0,
     }))
@@ -1073,13 +1115,47 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
   const waveCeiling = niceCeiling(Math.max(...points.map(point => point.wave ?? 0)), 0.5, 1);
   const windBase = GRAPH.windTop + GRAPH.windHeight;
   const yWind = (value: number) => windBase - (value / windCeiling) * GRAPH.windHeight;
-  const yWave = (value: number) => GRAPH.waveTop + GRAPH.waveHeight - (value / waveCeiling) * GRAPH.waveHeight;
 
-  const waveArea = (() => {
-    const drawn = points.map((point, position) => (point.wave === null ? null : `${centre(position).toFixed(1)},${yWave(point.wave).toFixed(1)}`)).filter(Boolean);
-    if (drawn.length < 2) return '';
-    const base = yWave(0).toFixed(1);
-    return `M${centre(0).toFixed(1)},${base} L${drawn.join(' L')} L${centre(points.length - 1).toFixed(1)},${base} Z`;
+  /**
+   * The sea is drawn as a sea, not as a chart of its height.
+   *
+   * An area plot of wave height is flat by nature — height barely moves across a
+   * day — so it reads as a sloping line that means nothing. Height also is not
+   * what anyone actually reads: a metre of long groundswell and a metre of short
+   * chop are different water. So the surface itself is drawn, with amplitude from
+   * the height and wavelength from the period. Long swell comes out as slow
+   * rollers, wind chop as tight ripples, which is the distinction that decides
+   * whether it is worth going.
+   *
+   * Wavelength varies along the day, so the phase has to be integrated as it
+   * goes rather than computed from x.
+   */
+  const seaSurface = (() => {
+    const startX = centre(0);
+    const endX = centre(points.length - 1);
+    if (endX <= startX) return '';
+    const midY = GRAPH.waveTop + GRAPH.waveHeight * 0.55;
+    const maxAmplitude = GRAPH.waveHeight * 0.42;
+    const step = 1.5;
+    const crest: string[] = [];
+    let phase = 0;
+    for (let x = startX; x <= endX; x += step) {
+      const position = Math.round(((x - startX) / (endX - startX)) * (points.length - 1));
+      const point = points[Math.min(points.length - 1, Math.max(0, position))];
+      const height = point.wave ?? 0;
+      const period = point.period ?? 6;
+      const wavelength = Math.max(13, Math.min(58, 8 + period * 3.8));
+      phase += (2 * Math.PI * step) / wavelength;
+      const amplitude = (height / waveCeiling) * maxAmplitude;
+      crest.push(`${x.toFixed(1)},${(midY - Math.sin(phase) * amplitude).toFixed(1)}`);
+    }
+    if (crest.length < 2) return '';
+    const floorY = (GRAPH.waveTop + GRAPH.waveHeight).toFixed(1);
+    return `M${startX.toFixed(1)},${floorY} L${crest.join(' L')} L${endX.toFixed(1)},${floorY} Z`;
+  })();
+  const typicalPeriod = (() => {
+    const periods = points.map(point => point.period).filter((v): v is number => v !== null);
+    return periods.length ? periods.reduce((sum, v) => sum + v, 0) / periods.length : null;
   })();
 
   const peakWind = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
@@ -1100,7 +1176,7 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
       <div className="section-title">
         <div>
           <p className="eyebrow">THROUGH THE DAY</p>
-          <h2>{fixed(peakWind.wind, 0)} kt{hasWave ? ` · ${peakWave.toFixed(1)} m` : ''}</h2>
+          <h2>{fixed(peakWind.wind, 0)} kt{hasWave ? ` · ${peakWave.toFixed(1)} m${typicalPeriod ? ` @ ${typicalPeriod.toFixed(0)} s` : ''}` : ''}</h2>
         </div>
         <div className="graph-legend">
           <span className="ramp-legend">
@@ -1154,10 +1230,9 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
           ))}
 
           {hasWave && <>
-            <path d={waveArea} fill={SERIES_WAVE} fillOpacity="0.3" />
-            <path d={waveArea} fill="none" stroke={SERIES_WAVE} strokeWidth="1.5" strokeLinejoin="round" />
-            <text x={GRAPH.left - 5} y={yWave(waveCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">{waveCeiling.toFixed(1)}</text>
-            <text x={GRAPH.left - 5} y={yWave(0) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">m</text>
+            <path d={seaSurface} fill={SERIES_WAVE} fillOpacity="0.26" />
+            <path d={seaSurface} fill="none" stroke={SERIES_WAVE} strokeWidth="1.4" strokeLinejoin="round" />
+            <text x={GRAPH.left - 5} y={GRAPH.waveTop + GRAPH.waveHeight * 0.55 + 3} textAnchor="end" fill="#89a0aa" fontSize="9">sea</text>
           </>}
 
           {/* No forced label on the last hour: next to the regular one it collides. */}
@@ -1171,7 +1246,7 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
         {active && (
           <p className="graph-tooltip">
             <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt {cardinal(active.direction)}
-            {active.wave !== null && <> · {active.wave.toFixed(1)} m</>}
+            {active.wave !== null && <> · {active.wave.toFixed(1)} m{active.period !== null ? ` @ ${active.period.toFixed(0)} s` : ''}</>}
             {active.offshore && <em> offshore</em>}
           </p>
         )}
@@ -1183,9 +1258,11 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
 // The column count travels to the grid as a custom property rather than a full
 // grid-template-columns value, so the responsive rules in the stylesheet still
 // win over the inline style.
-function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
+function ReadingTable({ data, indexes, dayIndexes, nowIndex, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
   data: Forecast | null;
   indexes: number[];
+  dayIndexes: number[];
+  nowIndex: number;
   rows: Row[];
   badge: string;
   eyebrow: string;
@@ -1194,6 +1271,12 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
   footnote?: { group: string; text: string };
   action?: ReactNode;
 }) {
+  // The column standing closest to the current hour, so "where am I" needs no
+  // arithmetic against the clock.
+  const current = indexes.includes(nowIndex)
+    ? nowIndex
+    : indexes.reduce<number | null>((best, index) => (
+      index <= nowIndex && (best === null || index > best) ? index : best), null);
   // Columns after dark are shaded, so a run of hours reads as a night at a
   // glance instead of having to be worked out from the clock.
   const night = new Set(indexes.filter(index => reading(data, 'is_day', index) === 0));
@@ -1220,7 +1303,7 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
         <div className="weather-table" style={{ '--cols': indexes.length } as CSSProperties}>
           <div className="table-head table-label"><b>LOCAL TIME</b></div>
           {indexes.map(index => (
-            <div className={`table-head${night.has(index) ? ' night' : ''}`} key={index}>
+            <div className={`table-head${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
               {formatHour(data?.hourly?.time?.[index])}
               {night.has(index) && <em aria-label="after dark">☾</em>}
             </div>
@@ -1231,9 +1314,14 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
                 <div className="table-group"><span>{row.group}</span></div>
               )}
               <div className="table-row">
-                <div className="table-label"><b>{row.label}</b><small>{row.unit}</small></div>
+                <div className={`table-label ${row.tier}`}>
+                <span className="label-text"><b>{row.label}</b><small>{row.unit}</small></span>
+                <Sparkline data={data} seriesKey={row.key} indexes={dayIndexes} tier={row.tier} />
+              </div>
                 {indexes.map(index => (
-                  <div className={`table-cell${night.has(index) ? ' night' : ''}`} key={index}>{row.render(data, index)}</div>
+                  <div className={`table-cell ${row.tier}${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
+                    {row.render(data, index)}
+                  </div>
                 ))}
               </div>
             </Fragment>

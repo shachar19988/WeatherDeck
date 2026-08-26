@@ -85,12 +85,32 @@ size carries neither well. Above the bars sits the reading the table buries and
 the sea decides everything by — direction — with offshore hours marked, so
 whether a session is on can be answered without reading a number.
 
-Waves get their own strip rather than a second line in the same box, because
+The sea is drawn as a sea rather than as a chart of its height. An area plot of
+wave height is flat by nature — height barely moves across a day — so it reads as
+a sloping line that means nothing, and height alone is not what anyone reads: a
+metre of long groundswell and a metre of short chop are different water. So the
+surface itself is drawn, amplitude from the height and wavelength from the
+period. Long swell comes out as slow rollers, wind chop as tight ripples.
+
+It sits in its own strip rather than as a second line in the wind box, because
 knots and metres are different scales and sharing an axis makes both unreadable.
 The sea is blue for a reason: the wind ramp already owns green through red, and
 the orange first used for waves sat 1.7 deltaE from the 25-30 kt band — close
 enough that on a windy day the sea strip and the wind bars read as the same
 thing.
+
+### Reading the table at a glance
+
+Every row used to carry the same visual weight, so there was nowhere for the eye
+to land. Three things fix that without hiding a single number:
+
+- **Tiers.** The readings a session turns on — direction, wind, gusts, waves,
+  period — are set loud; supporting readings normal; reference readings recede.
+- **A sparkline beside every row label**, scaled to that row's own range. Working
+  out whether something is rising or falling by reading eight numbers is the slow
+  part of a table; the shape answers it before the numbers are read at all.
+- **The current hour is marked**, so "where am I" needs no arithmetic against the
+  clock.
 
 ### Offshore wind
 
