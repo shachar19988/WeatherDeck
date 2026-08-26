@@ -24,3 +24,5 @@
 .agreement.good{background:#123029;color:var(--accent)}
 .agreement.fair{background:#332c14;color:#e2d271}
 .agreement.poor{background:#3a2119;color:#ff9c85}
+.table-group{grid-column:1/-1;padding:12px 0 6px;border-bottom:1px solid var(--line)}
+.table-group span{position:sticky;left:7px;font-size:8px;font-weight:900;letter-spacing:.16em;color:var(--accent)}

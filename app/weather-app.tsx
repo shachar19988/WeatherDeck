@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 
 type Location = { name: string; country: string; latitude: number; longitude: number };
@@ -7,7 +7,7 @@ type Hourly = { time: string[] } & Record<string, Series | string[]>;
 type Forecast = { hourly: Hourly; hourly_units?: Record<string, string>; utc_offset_seconds?: number };
 type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS';
 type ActiveModel = ModelKey | 'MEAN';
-type ViewKey = 'Forecast' | 'Compare' | 'Marine' | 'Map' | 'Saved';
+type ViewKey = 'Forecast' | 'Compare' | 'Map' | 'Saved';
 type DataSource = 'live' | 'cache' | 'none';
 type CachePayload = { forecasts: Partial<Record<ModelKey, Forecast>>; marine: Forecast | null; extended: Forecast | null; savedAt: number };
 
@@ -32,6 +32,7 @@ const CONSENSUS_KEYS = ['temperature_2m', 'relative_humidity_2m', 'precipitation
 // Bearings cannot be averaged arithmetically: the mean of 350 and 10 is 180,
 // which points the opposite way. They are averaged as unit vectors instead.
 const CIRCULAR_KEYS = new Set(['wind_direction_10m']);
+const MARINE_KEYS = MARINE_VARS.split(',');
 
 const CACHE_PREFIX = 'weatherdeck:cache:';
 const FAVORITES_KEY = 'weatherdeck:favorites';
@@ -71,6 +72,26 @@ function maximumReading(data: Forecast | null, key: string, indexes: number[]) {
     if (value !== null && value > bestValue) { bestValue = value; bestIndex = index; }
   }
   return bestIndex >= 0 ? { value: bestValue, index: bestIndex } : null;
+}
+function hasVisibleData(data: Forecast | null, key: string, indexes: number[]) {
+  return indexes.some(index => reading(data, key, index) !== null);
+}
+// The wave models run on their own, shorter axis. Rather than a second screen,
+// their series are remapped onto the weather axis by timestamp so one table can
+// carry the whole forecast for a day.
+function withMarine(base: Forecast | null, marine: Forecast | null): Forecast | null {
+  if (!base) return null;
+  if (!marine?.hourly?.time?.length) return base;
+  const positions = new Map<string, number>();
+  marine.hourly.time.forEach((time, index) => positions.set(time, index));
+  const hourly: Record<string, Series | string[]> = { ...base.hourly };
+  for (const key of MARINE_KEYS) {
+    hourly[key] = base.hourly.time.map(time => {
+      const index = positions.get(time);
+      return index === undefined ? null : reading(marine, key, index);
+    });
+  }
+  return { ...base, hourly: hourly as Hourly };
 }
 function stepIndexes(data: Forecast | null, start: number, step: number, count: number) {
   const length = data?.hourly?.time?.length ?? 0;
@@ -451,27 +472,14 @@ export default function WeatherApp() {
         : 'At least two models are needed for a mean'
       : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
   const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
+  const dayHeading = selectedDate ? `${dayLabel(selectedDate).dow} ${dayLabel(selectedDate).date}` : 'Forecast';
 
   const compareIndexes = useMemo(() => stepIndexes(current, nowIndex, 3, 8), [current, nowIndex]);
-  const marineNowIndex = useMemo(() => nowIndexFor(marine), [marine]);
-  const marineAvailable = hasSeries(marine, 'wave_height');
-  const marineDays = useMemo(
-    () => days.map((day, index) => ({ day, index })).filter(entry => coversDate(marine, entry.day, 'wave_height')),
-    [days, marine],
-  );
-  const marineSlots = useMemo(() => daySlots(marine, selectedDate, marineNowIndex), [marine, selectedDate, marineNowIndex]);
+  const tableData = useMemo(() => withMarine(forecastData, marine), [forecastData, marine]);
 
   const weatherDayIndexes = useMemo(() => indexesForDate(forecastData, selectedDate), [forecastData, selectedDate]);
   const marineDayIndexes = useMemo(() => indexesForDate(marine, selectedDate), [marine, selectedDate]);
   const peakWave = useMemo(() => maximumReading(marine, 'wave_height', marineDayIndexes), [marine, marineDayIndexes]);
-  // The marine summary follows the selected day rather than always reading
-  // "now": on any day but today the current hour says nothing about it.
-  const marineFocus = useMemo(() => {
-    if (selectedDate && selectedDate !== localDateAt(marine) && peakWave) {
-      return { index: peakWave.index, label: `daily peak at ${formatHour(marine?.hourly?.time?.[peakWave.index])}` };
-    }
-    return { index: marineNowIndex, label: 'now' };
-  }, [marine, selectedDate, peakWave, marineNowIndex]);
   const rainChance = useMemo(() => maximumReading(forecastData, 'precipitation_probability', weatherDayIndexes), [forecastData, weatherDayIndexes]);
   const peakCape = useMemo(() => maximumReading(forecastData, 'cape', weatherDayIndexes), [forecastData, weatherDayIndexes]);
   const dailyRain = useMemo(() => {
@@ -642,21 +650,22 @@ export default function WeatherApp() {
         </section>
 
         <ReadingTable
-          data={forecastData}
+          data={tableData}
           indexes={forecastIndexes}
-          rows={activeModel === 'MEAN' && !usingExtended ? MEAN_ROWS : WEATHER_ROWS}
+          rows={activeModel === 'MEAN' && !usingExtended ? MEAN_ROWS : FORECAST_ROWS}
           eyebrow="DETAILED FORECAST"
-          title="Wind & weather"
+          title={`${dayHeading} · every 3 hours`}
           badge={usingExtended ? 'ENSEMBLE' : activeModel === 'MEAN' ? 'MODEL MEAN' : 'HOURLY'}
           subject={usingExtended ? 'The ensemble mean' : modelSubject}
+          footnote={{ group: 'SEA', text: 'Sea rows come from the wave model and do not change with the selected weather model.' }}
         />
 
         <section className="quick-grid">
-          <button type="button" onClick={() => setActiveView('Marine')}>
+          <article>
             <span>WAVES · DAILY MAX</span>
             <strong>{peakWave ? `${peakWave.value.toFixed(1)} m` : '—'}</strong>
             <small>{peakWave ? `${fixed(reading(marine, 'wave_period', peakWave.index), 0)} s · ${cardinal(reading(marine, 'wave_direction', peakWave.index))}` : 'No marine data here'}</small>
-          </button>
+          </article>
           <article>
             <span>PRECIPITATION · DAILY</span>
             <strong>{rainChance ? `${rainChance.value.toFixed(0)}%` : dailyRain !== null ? `${dailyRain.toFixed(1)} mm` : '—'}</strong>
@@ -673,25 +682,13 @@ export default function WeatherApp() {
       </>}
 
       {activeView === 'Compare' && <CompareView forecasts={forecasts} indexes={compareIndexes} onSelect={model => { setActiveModel(model); setSelectedDay(0); setActiveView('Forecast'); }} />}
-      {activeView === 'Marine' && (
-        <MarineView
-          data={marine}
-          days={marineDays}
-          dayIndex={dayIndex}
-          slots={marineSlots}
-          focus={marineFocus}
-          selectedDate={selectedDate}
-          available={marineAvailable}
-          onSelectDay={setSelectedDay}
-        />
-      )}
       {activeView === 'Map' && <MapView location={location} />}
       {activeView === 'Saved' && <SavedView favorites={favorites} onSelect={selectLocation} onGps={requestGps} onRemove={removeFavorite} gpsError={gpsError} />}
 
       <nav className="bottom-nav" aria-label="Main navigation">
-        {(['Forecast', 'Compare', 'Marine', 'Map', 'Saved'] as ViewKey[]).map(view => (
+        {(['Forecast', 'Compare', 'Map', 'Saved'] as ViewKey[]).map(view => (
           <button type="button" key={view} className={activeView === view ? 'selected' : ''} aria-current={activeView === view ? 'page' : undefined} onClick={() => setActiveView(view)}>
-            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Compare' ? '≋' : view === 'Marine' ? '≈' : view === 'Map' ? '⌖' : '☆'}</span>{view}
+            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Compare' ? '≋' : view === 'Map' ? '⌖' : '☆'}</span>{view}
           </button>
         ))}
       </nav>
@@ -750,7 +747,7 @@ export default function WeatherApp() {
 
 /* ---------- views ---------- */
 
-type Row = { key: string; label: string; unit: string; render: (data: Forecast | null, index: number) => ReactNode };
+type Row = { key: string; group: string; label: string; unit: string; render: (data: Forecast | null, index: number) => ReactNode };
 
 const EMPTY_CELL = <span className="table-empty">—</span>;
 function numberCell(data: Forecast | null, key: string, index: number, format: (value: number) => ReactNode) {
@@ -762,13 +759,13 @@ function arrowCell(data: Forecast | null, key: string, index: number) {
 }
 
 const WEATHER_ROWS: Row[] = [
-  { key: 'wind_direction_10m', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wind_direction_10m', index) },
-  { key: 'wind_speed_10m', label: 'Wind', unit: 'kt', render: (data, index) => numberCell(data, 'wind_speed_10m', index, value => value.toFixed(1)) },
-  { key: 'wind_gusts_10m', label: 'Gusts', unit: 'kt', render: (data, index) => numberCell(data, 'wind_gusts_10m', index, value => value.toFixed(1)) },
-  { key: 'temperature_2m', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
-  { key: 'pressure_msl', label: 'Pressure', unit: 'hPa', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
-  { key: 'precipitation', label: 'Rain', unit: 'mm', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
-  { key: 'cloud_cover', label: 'Clouds', unit: '%', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
+  { key: 'wind_direction_10m', group: 'AIR', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wind_direction_10m', index) },
+  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', render: (data, index) => numberCell(data, 'wind_speed_10m', index, value => value.toFixed(1)) },
+  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', render: (data, index) => numberCell(data, 'wind_gusts_10m', index, value => value.toFixed(1)) },
+  { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
+  { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
+  { key: 'precipitation', group: 'AIR', label: 'Rain', unit: 'mm', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
+  { key: 'cloud_cover', group: 'AIR', label: 'Clouds', unit: '%', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
 ];
 
 // Shown only for the mean: a mean is worth no more than the agreement behind
@@ -776,6 +773,7 @@ const WEATHER_ROWS: Row[] = [
 const AGREEMENT_ROWS: Row[] = [
   {
     key: 'wind_speed_10m' + SPREAD_SUFFIX,
+    group: 'MODEL AGREEMENT',
     label: 'Wind spread',
     unit: 'kt',
     render: (data, index) => numberCell(data, 'wind_speed_10m' + SPREAD_SUFFIX, index,
@@ -783,28 +781,32 @@ const AGREEMENT_ROWS: Row[] = [
   },
   {
     key: 'wind_speed_10m' + COUNT_SUFFIX,
+    group: 'MODEL AGREEMENT',
     label: 'Models used',
     unit: `of ${MODEL_KEYS.length}`,
     render: (data, index) => numberCell(data, 'wind_speed_10m' + COUNT_SUFFIX, index, value => String(value)),
   },
 ];
-const MEAN_ROWS: Row[] = [...WEATHER_ROWS, ...AGREEMENT_ROWS];
+
 
 const MARINE_ROWS: Row[] = [
-  { key: 'wave_direction', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
-  { key: 'wave_height', label: 'Waves', unit: 'm', render: (data, index) => numberCell(data, 'wave_height', index, value => value.toFixed(1)) },
-  { key: 'wave_period', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
-  { key: 'swell_wave_height', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
-  { key: 'swell_wave_period', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
-  { key: 'wind_wave_height', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
-  { key: 'ocean_current_velocity', label: 'Current', unit: 'km/h', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
-  { key: 'sea_level_height_msl', label: 'Sea level', unit: 'm', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
+  { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
+  { key: 'wave_height', group: 'SEA', label: 'Waves', unit: 'm', render: (data, index) => numberCell(data, 'wave_height', index, value => value.toFixed(1)) },
+  { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
+  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
+  { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
+  { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
+  { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
+  { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
 ];
+
+const FORECAST_ROWS: Row[] = [...WEATHER_ROWS, ...MARINE_ROWS];
+const MEAN_ROWS: Row[] = [...WEATHER_ROWS, ...AGREEMENT_ROWS, ...MARINE_ROWS];
 
 // The column count travels to the grid as a custom property rather than a full
 // grid-template-columns value, so the responsive rules in the stylesheet still
 // win over the inline style.
-function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, subject }: {
+function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, subject, footnote }: {
   data: Forecast | null;
   indexes: number[];
   rows: Row[];
@@ -812,9 +814,21 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
   eyebrow: string;
   title: string;
   subject: string;
+  footnote?: { group: string; text: string };
 }) {
-  const rows = candidates.filter(row => hasSeries(data, row.key));
+  // Availability is judged on the hours actually on screen, so a variable the
+  // model stops publishing part-way through the range drops out of that day
+  // instead of rendering a row of dashes.
+  const rows = candidates.filter(row => hasVisibleData(data, row.key, indexes));
   const missing = candidates.filter(row => !rows.includes(row));
+  // A whole group that drops out is named once ("no sea data") rather than
+  // listed row by row.
+  const missingCopy = [...new Set(missing.map(row => row.group))].map(group => {
+    const absent = missing.filter(row => row.group === group);
+    return absent.length === candidates.filter(row => row.group === group).length
+      ? `no ${group.toLowerCase()} data`
+      : `no ${absent.map(row => row.label.toLowerCase()).join(', ')}`;
+  });
   return (
     <section className="forecast-card">
       <div className="section-title">
@@ -825,18 +839,26 @@ function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, 
         <div className="weather-table" style={{ '--cols': indexes.length } as CSSProperties}>
           <div className="table-head table-label"><b>LOCAL TIME</b></div>
           {indexes.map(index => <div className="table-head" key={index}>{formatHour(data?.hourly?.time?.[index])}</div>)}
-          {rows.map(row => (
-            <div className="table-row" key={row.label}>
-              <div className="table-label"><b>{row.label}</b><small>{row.unit}</small></div>
-              {indexes.map(index => <div className="table-cell" key={index}>{row.render(data, index)}</div>)}
-            </div>
+          {rows.map((row, position) => (
+            <Fragment key={row.key}>
+              {row.group !== rows[position - 1]?.group && (
+                <div className="table-group"><span>{row.group}</span></div>
+              )}
+              <div className="table-row">
+                <div className="table-label"><b>{row.label}</b><small>{row.unit}</small></div>
+                {indexes.map(index => <div className="table-cell" key={index}>{row.render(data, index)}</div>)}
+              </div>
+            </Fragment>
           ))}
         </div>
       ) : (
         <p className="notice">{subject} publishes no data for this day. Choose another day or source.</p>
       )}
-      {rows.length > 0 && missing.length > 0 && (
-        <p className="data-note">Not shown: {missing.map(row => row.label).join(', ')} — not published by this source.</p>
+      {rows.length > 0 && missingCopy.length > 0 && (
+        <p className="data-note">For this day: {missingCopy.join('; ')}.</p>
+      )}
+      {footnote && rows.some(row => row.group === footnote.group) && (
+        <p className="data-note">{footnote.text}</p>
       )}
     </section>
   );
@@ -898,66 +920,6 @@ function CompareView({ forecasts, indexes, onSelect }: { forecasts: Partial<Reco
           );
         })}
       </section>
-    </section>
-  );
-}
-
-function MarineView({ data, days, dayIndex, slots, focus, selectedDate, available, onSelectDay }: {
-  data: Forecast | null;
-  days: { day: string; index: number }[];
-  dayIndex: number;
-  slots: number[];
-  focus: { index: number; label: string };
-  selectedDate?: string;
-  available: boolean;
-  onSelectDay: (index: number) => void;
-}) {
-  const index = focus.index;
-  const heading = selectedDate ? `${dayLabel(selectedDate).dow} ${dayLabel(selectedDate).date}` : '';
-  return (
-    <section className="view-page">
-      <div className="view-heading">
-        <p className="eyebrow">MARINE FORECAST{heading ? ` · ${heading}` : ''}</p>
-        <h1>Sea conditions</h1>
-        <p>Wave, swell and current guidance for your selected coordinates, hour by hour.</p>
-      </div>
-      {!available ? (
-        <p className="notice">No marine forecast covers this point. The wave models only resolve open water, so inland and sheltered coordinates return nothing.</p>
-      ) : (
-        <>
-          <div className="marine-hero">
-            <div className="wave-orb"><span aria-hidden="true">≈</span></div>
-            <div>
-              <p>Significant wave height, {focus.label}</p>
-              <strong>{fixed(reading(data, 'wave_height', index), 1)} m</strong>
-              <small>{cardinal(reading(data, 'wave_direction', index))} · {fixed(reading(data, 'wave_period', index), 0)} second period</small>
-            </div>
-          </div>
-          <div className="marine-grid">
-            <article><span>PRIMARY SWELL</span><strong>{fixed(reading(data, 'swell_wave_height', index), 1)} m</strong><small>{cardinal(reading(data, 'swell_wave_direction', index))} · {fixed(reading(data, 'swell_wave_period', index), 0)} s</small></article>
-            <article><span>CURRENT</span><strong>{fixed(reading(data, 'ocean_current_velocity', index), 2)} km/h</strong><small>{cardinal(reading(data, 'ocean_current_direction', index))}</small></article>
-            <article><span>SEA LEVEL</span><strong>{fixed(reading(data, 'sea_level_height_msl', index), 2)} m</strong><small>Modelled height</small></article>
-          </div>
-
-          <section className="days-strip" aria-label="Marine forecast day">
-            {days.map(entry => {
-              const label = dayLabel(entry.day);
-              return (
-                <button type="button" key={entry.day} className={dayIndex === entry.index ? 'active' : ''} aria-pressed={dayIndex === entry.index} onClick={() => onSelectDay(entry.index)}>
-                  <b>{label.dow}</b><span>{label.date}</span><em>D+{entry.index}</em>
-                </button>
-              );
-            })}
-          </section>
-
-          {slots.length ? (
-            <ReadingTable data={data} indexes={slots} rows={MARINE_ROWS} eyebrow="SEA STATE" title="Hourly waves" badge="HOURLY" subject="The marine model" />
-          ) : (
-            <p className="notice">The wave models reach about ten days ahead, which does not cover the day selected on the forecast page. Pick an earlier day above.</p>
-          )}
-          <p className="data-note">Sea-level values are model guidance and should not replace official local tide tables.</p>
-        </>
-      )}
     </section>
   );
 }
