@@ -4,16 +4,16 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 
 ## Features
 
-- ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection
-- A MEAN tab averaging every available model into one table, with the hourly
-  spread and the number of contributing models shown alongside it
+- One table per day: pick a day and a model, and every three-hourly reading for
+  that day — air and sea together — is on a single screen
+- ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
+  option that averages them with the hourly spread and contributing model count
 - Side-by-side model comparison with a measured agreement score
 - 21-day rolling forecast
 - NOAA GEFS 31-member ensemble mean for the extended range
 - Forecast-confidence labels and ensemble spread for temperature and wind
 - Wind, gusts, temperature, pressure, precipitation, cloud cover and CAPE
-- Hourly marine forecast — wave, swell, wind wave, current and sea level — for
-  the same day selected on the forecast page
+- Wave, swell, wind wave, current and sea level as rows of that same table
 - Location search, GPS location and on-device saved spots
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
@@ -30,6 +30,19 @@ roughly 7.5 days even though its time axis spans 16.
 For dates the operational model does not cover, the app switches to the NOAA GEFS
 0.5-degree ensemble mean and labels the source accordingly. As a date moves into
 operational range, the higher-resolution forecast takes over again.
+
+### One table
+
+Everything for the selected day lives in a single three-hourly table, grouped
+into AIR, MODEL AGREEMENT (for the mean) and SEA. The wave models run on their
+own ten-day axis, so their series are remapped onto the weather axis by
+timestamp rather than by array position, and the sea rows simply drop out past
+their range. Rows are kept or dropped based on the hours actually on screen, so
+a variable a model stops publishing part-way through the range disappears for
+that day instead of rendering a line of dashes.
+
+Sea conditions do not depend on the selected weather model — the wave model is
+the same whichever one is chosen — and the table says so.
 
 ### The model mean
 
