@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
@@ -186,6 +187,7 @@ public class MainActivity extends Activity {
                     if ("true".equals(value)) {
                         webView.setVisibility(View.VISIBLE);
                         statusView.setVisibility(View.GONE);
+                        syncWidgetLocation();
                     } else if (attempt < READY_ATTEMPTS) {
                         handler.postDelayed(() -> pollForInterface(attempt + 1), READY_POLL_MS);
                     } else {
@@ -222,6 +224,43 @@ public class MainActivity extends Activity {
         pendingGeolocation.invoke(pendingGeolocationOrigin, granted, false);
         pendingGeolocation = null;
         pendingGeolocationOrigin = null;
+    }
+
+    /**
+     * The widget runs outside the WebView and cannot read its localStorage, so
+     * the chosen location is copied out to SharedPreferences. Reading the value
+     * back is a plain evaluateJavascript call — no JavaScript interface is
+     * installed, so the embedded map frame has nothing to reach for.
+     */
+    private void syncWidgetLocation() {
+        if (webView == null) return;
+        webView.evaluateJavascript("localStorage.getItem('weatherdeck:location')", value -> {
+            if (value == null || "null".equals(value)) return;
+            try {
+                // evaluateJavascript hands back a JSON string literal.
+                String json = new org.json.JSONTokener(value).nextValue().toString();
+                org.json.JSONObject location = new org.json.JSONObject(json);
+                double latitude = location.getDouble("latitude");
+                double longitude = location.getDouble("longitude");
+                SharedPreferences prefs = WidgetData.prefs(this);
+                boolean moved = !Double.toString(latitude).equals(prefs.getString(WidgetData.KEY_LAT, null))
+                        || !Double.toString(longitude).equals(prefs.getString(WidgetData.KEY_LON, null));
+                prefs.edit()
+                        .putString(WidgetData.KEY_LAT, Double.toString(latitude))
+                        .putString(WidgetData.KEY_LON, Double.toString(longitude))
+                        .putString(WidgetData.KEY_PLACE, location.optString("name", "Current location"))
+                        .apply();
+                if (moved) WidgetProvider.requestRefresh(this);
+            } catch (org.json.JSONException malformed) {
+                // Nothing usable stored yet; the widget keeps its last location.
+            }
+        });
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        syncWidgetLocation();
     }
 
     private void showFailure(String message) {

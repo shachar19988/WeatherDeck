@@ -23,6 +23,26 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 - Offline cache of the last successful forecast, clearly labelled as such
 - Automatic refresh every 30 minutes, on regaining connectivity, and on focus (throttled)
 
+## Home-screen widget
+
+A 4x4 Android widget shows today's temperature, wave and wind ranges over a
+scene that follows the current conditions.
+
+Home-screen widgets run on `RemoteViews`, which has no property animators and no
+animated drawables, so continuous animation is not available. `ViewFlipper` is
+available, and the system cycles its children on its own: the widget renders
+three frames of the same scene with clouds, rain and swell advanced a step, and
+the flipper plays them. The readings sit above the scene as real `TextView`s, so
+they stay sharp and cost nothing to redraw.
+
+The widget cannot read the interface's data — that lives in the WebView's
+localStorage, which native code has no access to — so it fetches its own small
+slice of Open-Meteo on a background thread held open by `goAsync()`, with no
+scheduling library. The app mirrors the chosen location into `SharedPreferences`
+with a plain `evaluateJavascript` read; no JavaScript interface is installed, so
+the embedded map frame has nothing to reach for. Ranges that cannot be read
+render as a dash, like everywhere else.
+
 ## Forecast strategy
 
 WeatherDeck uses the selected operational model wherever that model actually

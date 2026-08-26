@@ -66,6 +66,8 @@ function windTone(value: number) {
 const CACHE_PREFIX = 'weatherdeck:cache:';
 const FAVORITES_KEY = 'weatherdeck:favorites';
 const WIND_ALERT_KEY = 'weatherdeck:wind-alert';
+// Read by the Android wrapper so the home-screen widget follows the same place.
+const LOCATION_KEY = 'weatherdeck:location';
 const REFRESH_MS = 30 * 60 * 1000;
 // Open-Meteo's free tier is rate limited and every load costs six requests, so
 // incidental refreshes (window focus) are throttled to this interval.
@@ -372,6 +374,10 @@ export default function WeatherApp() {
     if (import.meta.env.PROD) navigator.serviceWorker?.register('/sw.js').catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    writeStorage(LOCATION_KEY, JSON.stringify(location));
+  }, [location]);
+
   const load = useCallback(async (signal: AbortSignal) => {
     setBusy(true);
     const base = `latitude=${location.latitude}&longitude=${location.longitude}&hourly=${WEATHER_VARS}&forecast_days=16&timezone=auto&wind_speed_unit=kn`;
@@ -595,6 +601,7 @@ export default function WeatherApp() {
   }
   function selectLocation(next: Location) {
     setLocation(next); setSelectedDay(0); setSearchOpen(false); setSearch(''); setResults(NO_RESULTS); setGpsError('');
+    writeStorage(LOCATION_KEY, JSON.stringify(next));
   }
   function changeWindAlert(value: number) {
     setWindAlert(value);
