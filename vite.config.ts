@@ -10,7 +10,11 @@ import { defineConfig } from 'vite';
  */
 function buildStamp() {
   try {
-    return execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+    // On a pull_request run the checkout is GitHub's generated merge commit,
+    // whose hash exists nowhere else — reporting it would name a build that
+    // cannot be looked up. Its second parent is the branch head, which can.
+    return execSync('git rev-parse --short "HEAD^2" 2>/dev/null || git rev-parse --short HEAD',
+      { encoding: 'utf8' }).trim();
   } catch {
     return 'unknown';
   }
