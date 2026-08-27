@@ -153,3 +153,7 @@
 .eyebrow.lead-medium{color:#d6dc69}
 .eyebrow.lead-low{color:#f0a45e}
 .eyebrow.lead-very-low{color:#ff806e}
+
+/* Model disagreement on a planned day. Amber rather than red: it is a reason
+   to wait before deciding, not a reason to cancel. */
+.plan-split{display:block;margin-top:5px;font-size:8px;color:#e8c06a;line-height:1.45}

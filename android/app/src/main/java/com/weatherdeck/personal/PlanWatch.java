@@ -43,6 +43,9 @@ final class PlanWatch {
     /** Twice a day. Inexact, so Android is free to batch it with other wake-ups. */
     private static final long INTERVAL_MS = android.app.AlarmManager.INTERVAL_HALF_DAY;
 
+    /** Kept in step with WAVE_MODELS in the interface; see the note there. */
+    private static final String WAVE_MODELS = "ecmwf_wam025,gwam,ewam,ncep_gfswave016,meteofrance_wave";
+
     static final String KEY_PLAN = "plan";
     private static final String KEY_LAST_HOURS = "planLastHours";
 
@@ -151,12 +154,25 @@ final class PlanWatch {
         if (airHourly == null) return 0;
 
         JSONArray wave = null;
+        JSONArray swell = null;
+        JSONArray swellPeriod = null;
+        JSONArray windWave = null;
         try {
+            // The same wave models the app averages, so the two counts are made
+            // of the same sea. Models outside their domain are dropped by the
+            // API rather than failing the request.
             JSONObject sea = WidgetData.fetch("https://marine-api.open-meteo.com/v1/marine"
                     + "?latitude=" + latitude + "&longitude=" + longitude
-                    + "&hourly=wave_height&start_date=" + date + "&end_date=" + date + "&timezone=auto");
+                    + "&hourly=wave_height,swell_wave_height,swell_wave_period,wind_wave_height"
+                    + "&start_date=" + date + "&end_date=" + date
+                    + "&timezone=auto&models=" + WAVE_MODELS);
             JSONObject seaHourly = sea.optJSONObject("hourly");
-            if (seaHourly != null) wave = seaHourly.optJSONArray("wave_height");
+            if (seaHourly != null) {
+                wave = meanSeries(seaHourly, "wave_height");
+                swell = meanSeries(seaHourly, "swell_wave_height");
+                swellPeriod = meanSeries(seaHourly, "swell_wave_period");
+                windWave = meanSeries(seaHourly, "wind_wave_height");
+            }
         } catch (IOException | JSONException noSea) {
             // Inland or out of marine coverage; the wave limits simply cannot bite.
         }
@@ -167,9 +183,43 @@ final class PlanWatch {
         int length = wind == null ? 0 : wind.length();
         int count = 0;
         for (int i = 0; i < length; i++) {
-            if (fits(limits, at(wind, i), at(gust, i), at(wave, i), at(day, i))) count++;
+            if (fits(limits, at(wind, i), at(gust, i), at(wave, i), at(day, i),
+                    at(swell, i), at(swellPeriod, i), at(windWave, i))) count++;
         }
         return count;
+    }
+
+    /**
+     * Averages the per-model series the marine API returns as wave_height_gwam,
+     * wave_height_ewam and so on, matching what the app shows. Nothing is
+     * invented: an hour no model answered for stays null.
+     */
+    private static JSONArray meanSeries(JSONObject hourly, String key) {
+        java.util.List<JSONArray> members = new java.util.ArrayList<>();
+        for (java.util.Iterator<String> names = hourly.keys(); names.hasNext(); ) {
+            String name = names.next();
+            if (!name.startsWith(key + "_")) continue;
+            JSONArray series = hourly.optJSONArray(name);
+            if (series != null) members.add(series);
+        }
+        if (members.isEmpty()) return null;
+
+        int length = 0;
+        for (JSONArray series : members) length = Math.max(length, series.length());
+        JSONArray mean = new JSONArray();
+        for (int i = 0; i < length; i++) {
+            double total = 0;
+            int seen = 0;
+            for (JSONArray series : members) {
+                Double value = at(series, i);
+                if (value == null) continue;
+                total += value;
+                seen++;
+            }
+            if (seen == 0) mean.put(JSONObject.NULL);
+            else mean.put(total / seen);
+        }
+        return mean;
     }
 
     private static Double at(JSONArray array, int index) {
@@ -178,8 +228,13 @@ final class PlanWatch {
         return Double.isNaN(value) ? null : value;
     }
 
-    private static boolean fits(JSONObject limits, Double wind, Double gust, Double wave, Double isDay) {
+    private static boolean fits(JSONObject limits, Double wind, Double gust, Double wave, Double isDay,
+            Double swell, Double swellPeriod, Double windWave) {
         if (limits.optBoolean("daylight", false) && (isDay == null || isDay < 0.5)) return false;
+        if (limits.has("swellMin") && (swell == null || swell < limits.optDouble("swellMin"))) return false;
+        if (limits.has("swellMax") && (swell == null || swell >= limits.optDouble("swellMax"))) return false;
+        if (limits.has("swellPeriodMin") && (swellPeriod == null ? 0 : swellPeriod) < limits.optDouble("swellPeriodMin")) return false;
+        if (limits.has("windWaveMax") && (windWave == null ? 0 : windWave) >= limits.optDouble("windWaveMax")) return false;
         if (limits.has("waveMin") && (wave == null || wave < limits.optDouble("waveMin"))) return false;
         if (limits.has("waveMax") && (wave == null || wave >= limits.optDouble("waveMax"))) return false;
         if (limits.has("windMin") && (wind == null || wind < limits.optDouble("windMin"))) return false;

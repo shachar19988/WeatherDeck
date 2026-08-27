@@ -49,12 +49,47 @@ const CONSENSUS_KEYS = ['temperature_2m', 'relative_humidity_2m', 'precipitation
 // which points the opposite way. They are averaged as unit vectors instead.
 const CIRCULAR_KEYS = new Set(['wind_direction_10m']);
 
+/*
+ * A disagreement warning that fires every day is wallpaper, so these are set
+ * from what the models actually do here rather than from a round number.
+ * Measured over ten days at Haifa: wave spread ran a median of 0.12 m and a
+ * 90th percentile of 0.22, wind spread a median of 3.7 kt and a 90th of 5.6.
+ * These sit just above that, so a split reads as unusual — which is the only
+ * thing that makes it worth reading.
+ */
+const SPLIT_WAVE_M = 0.25;
+const SPLIT_WIND_KT = 6;
+const WIND_AGREEMENT_KEYS = ['wind_speed_10m' + SPREAD_SUFFIX, 'wind_speed_10m' + COUNT_SUFFIX];
+
 const OFFSHORE_KEY = 'offshore';
 const SHORE_PREFIX = 'weatherdeck:shore:';
 const SHORE_SECTORS = 16;
 const SHORE_RINGS_KM = [5, 12];
 type ShoreMask = { sectors: boolean[]; water: boolean };
-const MARINE_KEYS = MARINE_VARS.split(',');
+/**
+ * Waves do not come from the six weather models in the picker — they come from
+ * wave models, and until now from exactly one of them, so the sea was the one
+ * quantity in this app that could never be doubted. Asking several the same
+ * question is what makes "how sure is this" answerable for the water too.
+ *
+ * best_match is deliberately absent. Measured at Haifa, Biarritz and Bali it is
+ * byte-identical to meteofrance_wave, so keeping both would weight MeteoFrance
+ * twice and quietly narrow the spread. ncep_gfswave025 is out for a different
+ * reason: at Biarritz it sits 1.2 m from every other model while its own finer
+ * sibling agrees with them, which is a grid point in the wrong place rather
+ * than a real disagreement.
+ *
+ * Regional models simply do not answer outside their domain — ewam is missing
+ * at Bali, and both it and ncep at Cape Town — and the API drops them without
+ * complaint. Each hour therefore carries how many models it is made of.
+ */
+const WAVE_MODELS = 'ecmwf_wam025,gwam,ewam,ncep_gfswave016,meteofrance_wave';
+const WAVE_ENSEMBLE_KEYS = ['wave_height', 'swell_wave_height', 'swell_wave_period', 'wind_wave_height'];
+
+const MARINE_KEYS = [
+  ...MARINE_VARS.split(','),
+  ...WAVE_ENSEMBLE_KEYS.flatMap(key => [key + COUNT_SUFFIX, key + SPREAD_SUFFIX]),
+];
 const MODEL_ROW_PREFIX = 'model:';
 
 /**
@@ -281,6 +316,9 @@ type Conditions = {
   offshore: boolean;
   daylight: boolean;
   water: number | null;
+  swell: number | null;
+  swellPeriod: number | null;
+  windWave: number | null;
 };
 /** A value at the precision it is printed at, so badges agree with the numbers. */
 function shown(value: number | null, digits: number) {
@@ -292,7 +330,8 @@ function clauses(...parts: (string | null)[]) {
   return parts.filter((part): part is string => part !== null).join(' · ');
 }
 
-type Spell = { start: number; end: number; hours: number; wind: number | null; wave: number | null; period: number | null; water: number | null };
+type Spell = { start: number; end: number; hours: number; wind: number | null; wave: number | null;
+  period: number | null; water: number | null; swell: number | null; swellPeriod: number | null };
 /**
  * Thresholds as plain numbers rather than as code, so the same set can be handed
  * to the Android side for the planned-day check without reimplementing any of
@@ -301,6 +340,17 @@ type Spell = { start: number; end: number; hours: number; wind: number | null; w
 type Limits = {
   waveMin?: number;
   waveMax?: number;
+  /*
+   * Total wave height answers "how much water is moving", which is the right
+   * question for a flat-water paddle or a boat full of guests. It is the wrong
+   * question for surfing one: 1.2 m of clean groundswell at 8 s is a session
+   * and 1.2 m of local wind chop at 4 s is a washing machine, and until now
+   * this app could not tell the two apart.
+   */
+  swellMin?: number;
+  swellMax?: number;
+  swellPeriodMin?: number;
+  windWaveMax?: number;
   windMin?: number;
   windMax?: number;
   gustMax?: number;
@@ -314,6 +364,10 @@ function suitsLimits(at: Conditions, limits: Limits) {
   if (limits.noOffshore && at.offshore) return false;
   if (limits.waveMin !== undefined && (at.wave === null || at.wave < limits.waveMin)) return false;
   if (limits.waveMax !== undefined && (at.wave === null || at.wave >= limits.waveMax)) return false;
+  if (limits.swellMin !== undefined && (at.swell === null || at.swell < limits.swellMin)) return false;
+  if (limits.swellMax !== undefined && (at.swell === null || at.swell >= limits.swellMax)) return false;
+  if (limits.swellPeriodMin !== undefined && (at.swellPeriod ?? 0) < limits.swellPeriodMin) return false;
+  if (limits.windWaveMax !== undefined && (at.windWave ?? 0) >= limits.windWaveMax) return false;
   if (limits.windMin !== undefined && (at.wind === null || at.wind < limits.windMin)) return false;
   if (limits.windMax !== undefined && (at.wind === null || at.wind > limits.windMax)) return false;
   if (limits.gustMax !== undefined && (at.gust ?? 0) >= limits.gustMax) return false;
@@ -365,12 +419,23 @@ const PROFILES: Profile[] = [
   {
     key: 'sup-surf',
     label: 'SUP surf',
-    hint: '0.6-1.5 m · 7 s+ · under 12 kt',
-    limits: { daylight: true, noOffshore: true, waveMin: 0.6, waveMax: 1.51, periodMin: 7, windMax: 12 },
-    why: spell => clauses(spell.wave === null ? null : `${spell.wave.toFixed(1)} m`,
-      spell.period === null ? null : `${spell.period.toFixed(0)} s`,
+    hint: 'swell 0.6-1.5 m · 6 s+ · little chop',
+    /*
+     * Judged on the swell alone, with the local wind sea held down separately.
+     * The old rule used total height and total period, which cannot distinguish
+     * a rideable swell from the same amount of chop.
+     *
+     * Six seconds, not seven, because this is the Mediterranean: measured over
+     * ten days at Haifa the swell period ran a median of 5.1 s and never once
+     * passed 7.7. A 7 s gate fired on 11 hours out of 240 — the top few per
+     * cent of a short-fetch sea — where 6 s finds 26. Somewhere with real
+     * groundswell this would want raising.
+     */
+    limits: { daylight: true, noOffshore: true, swellMin: 0.6, swellMax: 1.51, swellPeriodMin: 6, windWaveMax: 0.4, windMax: 12 },
+    why: spell => clauses(spell.swell === null ? null : `swell ${spell.swell.toFixed(1)} m`,
+      spell.swellPeriod === null ? null : `${spell.swellPeriod.toFixed(0)} s`,
       spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
-    pick: { of: spell => shown(spell.period, 0), best: 'high', label: 'cleanest swell' },
+    pick: { of: spell => shown(spell.swellPeriod, 0), best: 'high', label: 'cleanest swell' },
   },
   {
     key: 'sail',
@@ -422,6 +487,9 @@ function conditionsAt(data: Forecast | null, index: number): Conditions {
     offshore: reading(data, OFFSHORE_KEY, index) === 1,
     daylight: reading(data, 'is_day', index) === 1,
     water: reading(data, 'sea_surface_temperature', index),
+    swell: reading(data, 'swell_wave_height', index),
+    swellPeriod: reading(data, 'swell_wave_period', index),
+    windWave: reading(data, 'wind_wave_height', index),
   };
 }
 function withProfile(base: Forecast | null, profile: Profile | null): Forecast | null {
@@ -439,6 +507,26 @@ function withProfile(base: Forecast | null, profile: Profile | null): Forecast |
  * looked like when the plan was made.
  */
 type Plan = { date: string; profile: string; setAt: number; hours: number; wind: number | null; wave: number | null };
+
+/**
+ * How far apart the models were across a day, which is a different question
+ * from what they averaged to. A mean of 0.7 m built from 0.5 and 0.9 is not the
+ * same forecast as one built from 0.68 and 0.72, and for a day already in the
+ * diary the difference is whether to wait before cancelling.
+ */
+function agreementOn(data: Forecast | null, date: string) {
+  const indexes = indexesForDate(data, date);
+  const worst = (key: string) => {
+    const values = indexes.map(index => reading(data, key + SPREAD_SUFFIX, index)).filter((v): v is number => v !== null);
+    return values.length ? Math.max(...values) : null;
+  };
+  const wave = worst('wave_height');
+  const wind = worst('wind_speed_10m');
+  return {
+    wave, wind,
+    split: (wave !== null && wave >= SPLIT_WAVE_M) || (wind !== null && wind >= SPLIT_WIND_KT),
+  };
+}
 
 function planReading(data: Forecast | null, date: string, profile: Profile) {
   const indexes = indexesForDate(data, date);
@@ -485,6 +573,8 @@ function bestWindows(data: Forecast | null, from: number, count: number): Spell[
           wave: meanOver(data, 'wave_height', runStart, end),
           period: meanOver(data, 'wave_period', runStart, end),
           water: meanOver(data, 'sea_surface_temperature', runStart, end),
+          swell: meanOver(data, 'swell_wave_height', runStart, end),
+          swellPeriod: meanOver(data, 'swell_wave_period', runStart, end),
         });
       }
       runStart = -1;
@@ -670,6 +760,49 @@ function buildConsensus(forecasts: Partial<Record<ModelKey, Forecast>>) {
   // Daylight is a fact about the location, not a quantity to average.
   hourly.is_day = axis.hourly.is_day as Series;
   return { hourly: hourly as Hourly, utc_offset_seconds: axis.utc_offset_seconds, members: members.length };
+}
+
+/**
+ * Replaces the single-source wave series with the mean of the wave models, and
+ * records how far apart they were.
+ *
+ * The direction, water temperature and current stay as they were: those come
+ * from one model whatever we do, and pretending otherwise by leaving a stale
+ * spread beside them would be worse than having none.
+ */
+function withWaveConsensus(marine: Forecast | null, ensemble: Forecast | null): Forecast | null {
+  const times = marine?.hourly?.time;
+  if (!marine || !times?.length || !ensemble?.hourly?.time?.length) return marine;
+
+  const positions = new Map<string, number>();
+  ensemble.hourly.time.forEach((time, index) => positions.set(time, index));
+
+  const hourly: Record<string, Series | string[]> = { ...marine.hourly };
+  for (const key of WAVE_ENSEMBLE_KEYS) {
+    const members = Object.keys(ensemble.hourly).filter(name => name.startsWith(key + '_'));
+    if (!members.length) continue;
+    const mean: Series = [];
+    const count: Series = [];
+    const spread: Series = [];
+    for (const time of times) {
+      const at = positions.get(time);
+      const values: number[] = [];
+      if (at !== undefined) {
+        for (const name of members) {
+          const value = reading(ensemble, name, at);
+          if (value !== null) values.push(value);
+        }
+      }
+      if (!values.length) { mean.push(null); count.push(null); spread.push(null); continue; }
+      mean.push(values.reduce((sum, value) => sum + value, 0) / values.length);
+      count.push(values.length);
+      spread.push(values.length > 1 ? Math.max(...values) - Math.min(...values) : null);
+    }
+    hourly[key] = mean;
+    hourly[key + COUNT_SUFFIX] = count;
+    hourly[key + SPREAD_SUFFIX] = spread;
+  }
+  return { ...marine, hourly: hourly as Hourly };
 }
 
 // Kept out of the component so the memo around it stays a single call the
@@ -861,12 +994,16 @@ export default function WeatherApp() {
   const load = useCallback(async (signal: AbortSignal) => {
     setBusy(true);
     const base = `latitude=${location.latitude}&longitude=${location.longitude}&hourly=${WEATHER_VARS}&forecast_days=16&timezone=auto&wind_speed_unit=kn`;
-    const [models, nextMarine, nextExtended] = await Promise.all([
+    const [models, baseMarine, waveModels, nextExtended] = await Promise.all([
       Promise.all(MODEL_KEYS.map(key => fetchJson<Forecast>(`https://api.open-meteo.com/v1/forecast?${base}&models=${MODEL_IDS[key]}`, signal))),
       fetchJson<Forecast>(`https://marine-api.open-meteo.com/v1/marine?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${MARINE_VARS}&forecast_days=10&timezone=auto`, signal),
+      fetchJson<Forecast>(`https://marine-api.open-meteo.com/v1/marine?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${WAVE_ENSEMBLE_KEYS.join(',')}&forecast_days=10&timezone=auto&models=${WAVE_MODELS}`, signal),
       fetchJson<Forecast>(`https://ensemble-api.open-meteo.com/v1/ensemble?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${LONG_RANGE_VARS}&forecast_days=21&timezone=auto&wind_speed_unit=kn&models=ncep_gefs05_ensemble_mean`, signal),
     ]);
     if (signal.aborted) return;
+
+    // Merged before it is cached, so the cache holds what the table reads.
+    const nextMarine = withWaveConsensus(baseMarine, waveModels);
 
     const next: Partial<Record<ModelKey, Forecast>> = {};
     MODEL_KEYS.forEach((key, i) => {
@@ -998,12 +1135,12 @@ export default function WeatherApp() {
   const planProfile = plan ? PROFILES.find(entry => entry.key === plan.profile) ?? null : null;
   const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
-    const withSea = withSeries(continuous, marine, MARINE_KEYS);
+    const withSea = withSeries(withSeries(continuous, marine, MARINE_KEYS), consensus ?? undefined, WIND_AGREEMENT_KEYS);
     // The ensemble carries no daylight flag; borrow it from any operational model.
     const lit = hasSeries(withSea, 'is_day') ? withSea : withSeries(withSea, current ?? undefined, ['is_day']);
     const flagged = withProfile(withOffshore(carryDaylight(lit), shore), profile);
     return compareModels ? withModelWinds(flagged, forecasts) : flagged;
-  }, [continuous, marine, current, forecasts, compareModels, shore, profile]);
+  }, [continuous, marine, consensus, current, forecasts, compareModels, shore, profile]);
 
   // Every three-hourly slot of every day, in order — the table is one scroll
   // through the whole range rather than a view onto a chosen day.
@@ -1261,6 +1398,7 @@ export default function WeatherApp() {
             moved(plan.wave, now.wave, 1, 'sea'),
             moved(plan.wind, now.wind, 0, 'wind'),
           );
+          const agreement = agreementOn(tableData, plan.date);
           return (
             <section className={`plan-card ${state}`}>
               <p className="plan-head">
@@ -1277,6 +1415,14 @@ export default function WeatherApp() {
                 ) || 'no readings yet'}
               </small>
               {changes && <small className="plan-change">since {dayLabel(new Date(plan.setAt).toISOString().slice(0, 10)).dow}: {changes}</small>}
+              {agreement.split && (
+                <small className="plan-split">
+                  models split on {clauses(
+                    agreement.wave !== null && agreement.wave >= SPLIT_WAVE_M ? `sea by ${agreement.wave.toFixed(1)} m` : null,
+                    agreement.wind !== null && agreement.wind >= SPLIT_WIND_KT ? `wind by ${agreement.wind.toFixed(0)} kt` : null,
+                  )} — look again nearer the day
+                </small>
+              )}
             </section>
           );
         })()}
@@ -1622,7 +1768,32 @@ const MARINE_ROWS: Row[] = [
   { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'sea_surface_temperature', index, near, tempTone, value => `${Math.round(value)}°`) },
   { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'swell_wave_height', index, near, waveTone, value => value.toFixed(1)) },
   { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
-  { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', tier: 'normal', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
+  {
+    key: 'wind_wave_height',
+    group: 'SEA',
+    label: 'Wind wave',
+    unit: 'm',
+    tier: 'normal',
+    // The same ramp as the swell row above it on purpose: the two are only
+    // worth reading against each other, and they cannot be compared by eye if
+    // one is painted and the other is a bare number. A green swell over a red
+    // wind wave is chop; the other way round is a session.
+    render: (data, index, near) => spectrumCell(data, 'wind_wave_height', index, near, waveTone, value => value.toFixed(1)),
+  },
+  {
+    key: 'wave_height' + SPREAD_SUFFIX,
+    group: 'SEA',
+    label: 'Model split',
+    unit: 'm',
+    tier: 'reference',
+    /*
+     * How far apart the wave models were at that hour. Until this release the
+     * sea came from one model and this row could not have existed; the number
+     * shown above is now their mean, and this says how much of an agreement
+     * that mean represents.
+     */
+    render: (data, index) => numberCell(data, 'wave_height' + SPREAD_SUFFIX, index, value => value.toFixed(2)),
+  },
   { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', tier: 'reference', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
   { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', tier: 'reference', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
 ];
