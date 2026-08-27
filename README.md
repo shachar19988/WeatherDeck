@@ -4,8 +4,9 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 
 ## Features
 
-- One table per day: pick a day and a model, and every three-hourly reading for
-  that day — air and sea together — is on a single screen
+- One continuous table: every three-hourly reading of the whole range — air and
+  sea together, day after day — in a single horizontal scroll with the dates,
+  hours and row labels pinned
 - ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
   option that averages them with the hourly spread and contributing model count
 - Wind and waves graphed for the selected day at full hourly resolution: wind as
@@ -114,8 +115,12 @@ to land. Three things fix that without hiding a single number:
 - **Every group restates the clock.** Scrolled down past a single header row, a
   column of numbers stops saying which hour it is, so each group header carries
   the hours again.
-- **Wind and temperature fill their cells** edge to edge rather than sitting in a
-  chip, so a row reads as one continuous band instead of a line of swatches.
+- **Spectrum rows.** Wind, gusts, temperature, waves, swell and water temperature
+  fill their cells edge to edge, and each half fades towards the neighbouring
+  column's colour, so a row reads as one continuous gradient across the range
+  rather than a line of separate swatches. Wave height has its own blue ramp:
+  the wind ramp owns green to red, and a sea row beside a wind row must never
+  read as the same measurement.
 - **A dry hour is an empty drop.** Eight cells reading "0.0" is filler the eye
   skips — which is why the rain row may as well not have been there on a dry day.
   A wet hour fills in, states the amount, and tints in proportion to it.
@@ -141,10 +146,26 @@ night instead of being worked out from the clock. Day chips carry that day's
 temperature range and strongest wind, which is usually enough to decide whether
 a day is worth opening at all.
 
-### One table
+### One continuous table
 
-Everything for the selected day lives in a single three-hourly table, grouped
-into AIR, MODEL AGREEMENT (for the mean) and SEA. The wave models run on their
+Days used to be a filter: pick one, see eight columns. Reading Friday against
+Saturday meant tapping between them and holding the numbers in your head. The
+table now runs straight through the whole range, days separated by a rule and
+headed by their date, and the day strip scrolls it rather than swapping its
+contents.
+
+That makes the header load-bearing: scrolled anywhere but the top left, a column
+of numbers says neither which hour nor which day it is. So the table is its own
+scroll box with the dates and hours pinned to the top, the row labels pinned to
+the left, and each date pinned inside its own span so it stays put while you
+scroll through that day's hours.
+
+A table that scrolls through three weeks cannot let each day pick its own source,
+so the operational model and the ensemble are stitched into one series first —
+the operational value wherever it exists, the ensemble beyond it, hour by hour —
+and the days that fall back to the ensemble are marked ENS in their header.
+
+Readings are grouped into AIR, MODEL AGREEMENT (for the mean) and SEA. The wave models run on their
 own ten-day axis, so their series are remapped onto the weather axis by
 timestamp rather than by array position, and the sea rows simply drop out past
 their range. Rows are kept or dropped based on the hours actually on screen, so

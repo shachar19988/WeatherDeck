@@ -90,6 +90,34 @@ function tempTone(value: number) {
   return TEMP_SCALE.find(band => value < band.limit) ?? TEMP_SCALE[TEMP_SCALE.length - 1];
 }
 
+/**
+ * Wave height, calm to heavy. Blue throughout, because the wind ramp already
+ * owns green to red and a sea row beside a wind row must never read as the same
+ * measurement. Ink checked against each fill; worst case 5.24:1, lightness monotone.
+ */
+const WAVE_SCALE = [
+  { limit: 0.3, fill: '#12384f', ink: '#dceaf5' },
+  { limit: 0.6, fill: '#1b5478', ink: '#eaf3fa' },
+  { limit: 1.0, fill: '#2172a4', ink: '#ffffff' },
+  { limit: 1.5, fill: '#3f9ac9', ink: '#0a1a24' },
+  { limit: 2.5, fill: '#6dbde0', ink: '#0a1a24' },
+  { limit: 4, fill: '#a5d8ee', ink: '#0a1a24' },
+  { limit: Infinity, fill: '#d6ecf8', ink: '#0a1a24' },
+];
+function waveTone(value: number) {
+  return WAVE_SCALE.find(band => value < band.limit) ?? WAVE_SCALE[WAVE_SCALE.length - 1];
+}
+
+/**
+ * Averaged in plain sRGB. Adjacent ramp steps are close enough that a
+ * perceptual blend would not look different, and this runs per cell.
+ */
+function mixHex(a: string, b: string) {
+  const channel = (hex: string, at: number) => parseInt(hex.slice(at, at + 2), 16);
+  const pair = (at: number) => Math.round((channel(a, at) + channel(b, at)) / 2).toString(16).padStart(2, '0');
+  return `#${pair(1)}${pair(3)}${pair(5)}`;
+}
+
 const CACHE_PREFIX = 'weatherdeck:cache:';
 const FAVORITES_KEY = 'weatherdeck:favorites';
 const WIND_ALERT_KEY = 'weatherdeck:wind-alert';
@@ -151,6 +179,35 @@ function withSeries(base: Forecast | null, source: Forecast | null | undefined, 
   }
   return { ...base, hourly: hourly as Hourly };
 }
+/**
+ * Joins the operational model to the ensemble into one series covering the whole
+ * range: the operational value wherever it exists, the ensemble beyond it.
+ *
+ * The table used to be built one day at a time, which let each day pick its own
+ * source. A table that scrolls straight through three weeks cannot do that, so
+ * the choice moves here, hour by hour, and stays the rule the app already
+ * follows — operational while it publishes, ensemble after.
+ */
+function stitch(primary: Forecast | null, fallback: Forecast | null): Forecast | null {
+  if (!fallback?.hourly?.time?.length) return primary;
+  if (!primary?.hourly?.time?.length) return fallback;
+  const axis = primary.hourly.time.length >= fallback.hourly.time.length ? primary : fallback;
+  const other = axis === primary ? fallback : primary;
+  const positions = new Map<string, number>();
+  other.hourly.time.forEach((time, index) => positions.set(time, index));
+
+  const keys = new Set([...Object.keys(primary.hourly), ...Object.keys(fallback.hourly)]);
+  keys.delete('time');
+  const hourly: Record<string, Series | string[]> = { time: axis.hourly.time };
+  for (const key of keys) {
+    hourly[key] = axis.hourly.time.map((time, index) => {
+      const at = (source: Forecast) => reading(source, key, source === axis ? index : (positions.get(time) ?? -1));
+      return at(primary) ?? at(fallback);
+    });
+  }
+  return { hourly: hourly as Hourly, utc_offset_seconds: axis.utc_offset_seconds };
+}
+
 // One wind row per model, in place of a separate comparison screen.
 function withModelWinds(base: Forecast | null, forecasts: Partial<Record<ModelKey, Forecast>>) {
   return MODEL_KEYS.reduce<Forecast | null>(
@@ -636,15 +693,30 @@ export default function WeatherApp() {
         : 'At least two models are needed for a mean'
       : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
   const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
-  const dayHeading = selectedDate ? `${dayLabel(selectedDate).dow} ${dayLabel(selectedDate).date}` : 'Forecast';
 
+  const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
-    const withSea = withSeries(forecastData, marine, MARINE_KEYS);
+    const withSea = withSeries(continuous, marine, MARINE_KEYS);
     // The ensemble carries no daylight flag; borrow it from any operational model.
     const lit = hasSeries(withSea, 'is_day') ? withSea : withSeries(withSea, current ?? undefined, ['is_day']);
     const flagged = withOffshore(lit, shore);
     return compareModels ? withModelWinds(flagged, forecasts) : flagged;
-  }, [forecastData, marine, current, forecasts, compareModels, shore]);
+  }, [continuous, marine, current, forecasts, compareModels, shore]);
+
+  // Every three-hourly slot of every day, in order — the table is one scroll
+  // through the whole range rather than a view onto a chosen day.
+  const tableColumns = useMemo(() => {
+    const startAt = nowIndexFor(tableData);
+    const columns: { index: number; date: string }[] = [];
+    for (const day of days) {
+      for (const index of daySlots(tableData, day, startAt)) columns.push({ index, date: day });
+    }
+    return columns;
+  }, [tableData, days]);
+  const ensembleDays = useMemo(
+    () => new Set(days.filter(day => !coversDate(current, day))),
+    [days, current],
+  );
   const tableRows = useMemo(() => [
     ...WEATHER_ROWS,
     ...(activeModel === 'MEAN' && !usingExtended ? AGREEMENT_ROWS : []),
@@ -847,14 +919,15 @@ export default function WeatherApp() {
 
         <ReadingTable
           data={tableData}
-          indexes={forecastIndexes}
-          dayIndexes={weatherDayIndexes}
-          nowIndex={dataNowIndex}
+          columns={tableColumns}
+          ensembleDays={ensembleDays}
+          focusDate={selectedDate}
+          nowIndex={nowIndexFor(tableData)}
           rows={tableRows}
           eyebrow="DETAILED FORECAST"
-          title={`${dayHeading} · every 3 hours`}
-          badge={usingExtended ? 'ENSEMBLE' : activeModel === 'MEAN' ? 'MODEL MEAN' : 'HOURLY'}
-          subject={usingExtended ? 'The ensemble mean' : modelSubject}
+          title={`${days.length} days · every 3 hours`}
+          badge={activeModel === 'MEAN' ? 'MODEL MEAN' : modelSubject}
+          subject={modelSubject}
           footnote={{ group: 'SEA', text: 'Sea rows come from the wave model and do not change with the selected weather model.' }}
           action={
             <button type="button" className={`table-toggle ${compareModels ? 'on' : ''}`} aria-pressed={compareModels} onClick={() => setCompareModels(!compareModels)}>
@@ -956,20 +1029,50 @@ export default function WeatherApp() {
  * ones recede — the numbers are all still there, they just stop competing.
  */
 type Tier = 'lead' | 'normal' | 'reference';
-type Row = { key: string; group: string; label: string; unit: string; tier: Tier; render: (data: Forecast | null, index: number) => ReactNode };
+/** The columns either side, so a spectrum row can blend across cell edges. */
+type Neighbours = { before: number | null; after: number | null };
+type Row = { key: string; group: string; label: string; unit: string; tier: Tier; render: (data: Forecast | null, index: number, near: Neighbours) => ReactNode };
 
 const EMPTY_CELL = <span className="table-empty">—</span>;
 function numberCell(data: Forecast | null, key: string, index: number, format: (value: number) => ReactNode) {
   const value = reading(data, key, index);
   return value === null ? EMPTY_CELL : format(value);
 }
-// The fill runs edge to edge rather than sitting in a chip, so a wind row reads
-// as one continuous band of colour instead of a line of separate swatches.
-function windCell(data: Forecast | null, key: string, index: number) {
+/**
+ * A spectrum cell: the fill runs edge to edge, and each half fades towards the
+ * neighbouring column's colour, so a row reads as one continuous gradient across
+ * the day rather than a line of separate swatches. This is the single change
+ * that makes a wall of numbers scannable.
+ */
+function spectrumCell(
+  data: Forecast | null,
+  key: string,
+  index: number,
+  near: Neighbours,
+  tone: (value: number) => { fill: string; ink: string },
+  format: (value: number) => string,
+) {
   return numberCell(data, key, index, value => {
-    const tone = windTone(value);
-    return <span className="scale-fill" style={{ background: tone.fill, color: tone.ink }}>{value.toFixed(1)}</span>;
+    const here = tone(value);
+    const edge = (at: number | null) => {
+      const neighbour = at === null ? null : reading(data, key, at);
+      return neighbour === null ? here.fill : mixHex(here.fill, tone(neighbour).fill);
+    };
+    return (
+      <span
+        className="scale-fill"
+        style={{
+          background: `linear-gradient(90deg, ${edge(near.before)} 0%, ${here.fill} 45%, ${here.fill} 55%, ${edge(near.after)} 100%)`,
+          color: here.ink,
+        }}
+      >
+        {format(value)}
+      </span>
+    );
   });
+}
+function windCell(data: Forecast | null, key: string, index: number, near: Neighbours) {
+  return spectrumCell(data, key, index, near, windTone, value => value.toFixed(1));
 }
 function arrowCell(data: Forecast | null, key: string, index: number) {
   return numberCell(data, key, index, value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>);
@@ -1018,18 +1121,15 @@ const WEATHER_ROWS: Row[] = [
       </span>
     )),
   },
-  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
-  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', tier: 'lead', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
+  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', tier: 'lead', render: (data, index, near) => windCell(data, 'wind_speed_10m', index, near) },
+  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', tier: 'lead', render: (data, index, near) => windCell(data, 'wind_gusts_10m', index, near) },
   {
     key: 'temperature_2m',
     group: 'AIR',
     label: 'Temperature',
     unit: '°C',
     tier: 'normal',
-    render: (data, index) => numberCell(data, 'temperature_2m', index, value => {
-      const tone = tempTone(value);
-      return <span className="scale-fill" style={{ background: tone.fill, color: tone.ink }}>{Math.round(value)}°</span>;
-    }),
+    render: (data, index, near) => spectrumCell(data, 'temperature_2m', index, near, tempTone, value => `${Math.round(value)}°`),
   },
   { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', tier: 'reference', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
   {
@@ -1086,16 +1186,11 @@ const MARINE_ROWS: Row[] = [
     label: 'Waves',
     unit: 'm',
     tier: 'lead',
-    // The bar is a second reading of the same number, not a replacement for it.
-    render: (data, index) => numberCell(data, 'wave_height', index, value => (
-      <span className="wave-chip" style={{ '--fill': `${Math.min(100, (value / 3) * 100).toFixed(0)}%` } as CSSProperties}>
-        {value.toFixed(1)}
-      </span>
-    )),
+    render: (data, index, near) => spectrumCell(data, 'wave_height', index, near, waveTone, value => value.toFixed(1)),
   },
   { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', tier: 'lead', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
-  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index) => numberCell(data, 'sea_surface_temperature', index, value => <span className="temp-pill water">{Math.round(value)}°</span>) },
-  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
+  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'sea_surface_temperature', index, near, tempTone, value => `${Math.round(value)}°`) },
+  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'swell_wave_height', index, near, waveTone, value => value.toFixed(1)) },
   { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
   { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', tier: 'normal', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
   { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', tier: 'reference', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
@@ -1108,7 +1203,7 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   label: model,
   unit: MODEL_META[model].provider,
   tier: 'normal',
-  render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
+  render: (data, index, near) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index, near),
 }));
 
 const GRAPH = { width: 320, left: 30, right: 10, arrowY: 13, windTop: 24, windHeight: 84, waveTop: 130, waveHeight: 40 };
@@ -1310,10 +1405,24 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
 // The column count travels to the grid as a custom property rather than a full
 // grid-template-columns value, so the responsive rules in the stylesheet still
 // win over the inline style.
-function ReadingTable({ data, indexes, dayIndexes, nowIndex, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
+/**
+ * One table for the whole range.
+ *
+ * Days used to be a filter: pick one, see eight columns. Reading Friday against
+ * Saturday meant tapping between them and holding the numbers in your head. Now
+ * the days run on, separated by a rule and headed by their date, and the day
+ * strip above scrolls here instead of swapping the contents.
+ *
+ * That makes the header the load-bearing part: scrolled anywhere but the top
+ * left, a column of numbers says neither which hour nor which day it is. So the
+ * table is its own scroll box with the date and hour rows pinned to the top and
+ * the labels pinned to the left.
+ */
+function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
   data: Forecast | null;
-  indexes: number[];
-  dayIndexes: number[];
+  columns: { index: number; date: string }[];
+  ensembleDays: Set<string>;
+  focusDate?: string;
   nowIndex: number;
   rows: Row[];
   badge: string;
@@ -1323,68 +1432,118 @@ function ReadingTable({ data, indexes, dayIndexes, nowIndex, rows: candidates, b
   footnote?: { group: string; text: string };
   action?: ReactNode;
 }) {
-  // The column standing closest to the current hour, so "where am I" needs no
-  // arithmetic against the clock.
-  const current = indexes.includes(nowIndex)
-    ? nowIndex
-    : indexes.reduce<number | null>((best, index) => (
-      index <= nowIndex && (best === null || index > best) ? index : best), null);
-  // Columns after dark are shaded, so a run of hours reads as a night at a
-  // glance instead of having to be worked out from the clock.
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const indexes = useMemo(() => columns.map(column => column.index), [columns]);
+
+  // Measured from the boxes themselves rather than offsetLeft: the day headers
+  // are sticky, so their offsetParent is not the scroll box and offsetLeft
+  // answers a different question than the one being asked.
+  useEffect(() => {
+    const box = scroller.current;
+    if (!box || !focusDate) return;
+    const target = box.querySelector<HTMLElement>(`[data-day-start="${focusDate}"]`);
+    if (!target) return;
+    const label = box.querySelector<HTMLElement>('.table-label');
+    const gutter = label ? label.getBoundingClientRect().width : 0;
+    const delta = target.getBoundingClientRect().left - box.getBoundingClientRect().left - gutter;
+    box.scrollTo({ left: Math.max(0, box.scrollLeft + delta), behavior: 'smooth' });
+  }, [focusDate]);
+
   const night = new Set(indexes.filter(index => reading(data, 'is_day', index) === 0));
-  // Availability is judged on the hours actually on screen, so a variable the
-  // model stops publishing part-way through the range drops out of that day
-  // instead of rendering a row of dashes.
   const rows = candidates.filter(row => hasVisibleData(data, row.key, indexes));
   const missing = candidates.filter(row => !rows.includes(row));
-  // A whole group that drops out is named once ("no sea data") rather than
-  // listed row by row.
   const missingCopy = [...new Set(missing.map(row => row.group))].map(group => {
     const absent = missing.filter(row => row.group === group);
     return absent.length === candidates.filter(row => row.group === group).length
       ? `no ${group.toLowerCase()} data`
       : `no ${absent.map(row => row.label.toLowerCase()).join(', ')}`;
   });
+
+  // Runs of columns belonging to the same day, for the spanning date header.
+  const spans: { date: string; from: number; count: number }[] = [];
+  columns.forEach((column, position) => {
+    const last = spans[spans.length - 1];
+    if (last && last.date === column.date) last.count += 1;
+    else spans.push({ date: column.date, from: position, count: 1 });
+  });
+
+  const current = indexes.includes(nowIndex)
+    ? nowIndex
+    : indexes.reduce<number | null>((best, index) => (
+      index <= nowIndex && (best === null || index > best) ? index : best), null);
+
   return (
     <section className="forecast-card">
       <div className="section-title">
         <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
         <div className="section-actions">{action}<span className="live-badge">{badge}</span></div>
       </div>
-      {rows.length && indexes.length ? (
-        <div className="weather-table" style={{ '--cols': indexes.length } as CSSProperties}>
-          {rows.map((row, position) => (
-            <Fragment key={row.key}>
-              {/* Each group restates the clock. Scrolled down past a single
-                  header, a column of numbers stops saying which hour it is. */}
-              {row.group !== rows[position - 1]?.group && <>
-                <div className="table-head table-label"><b>{row.group}</b></div>
-                {indexes.map(index => (
-                  <div className={`table-head${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
-                    {formatHour(data?.hourly?.time?.[index])}
-                    {night.has(index) && <em aria-label="after dark">☾</em>}
-                  </div>
-                ))}
-              </>}
-              <div className="table-row">
-                <div className={`table-label ${row.tier}`}>
-                <span className="label-text"><b>{row.label}</b><small>{row.unit}</small></span>
-                <Sparkline data={data} seriesKey={row.key} indexes={dayIndexes} tier={row.tier} />
+      {rows.length && columns.length ? (
+        <div className="weather-table" ref={scroller}>
+          <div className="table-grid" style={{ '--cols': columns.length } as CSSProperties}>
+            <div className="table-day table-label corner"><b>DATE</b></div>
+            {spans.map(span => {
+              const label = dayLabel(span.date);
+              return (
+                <div
+                  className={`table-day${span.from === 0 ? '' : ' day-start'}`}
+                  data-day-start={span.date}
+                  style={{ gridColumn: `span ${span.count}` }}
+                  key={span.date}
+                >
+                  {/* Pinned inside its own span, so the date stays put while you
+                      scroll through that day's hours rather than sliding away. */}
+                  <span className="day-name">
+                    <b>{label.dow}</b> {label.date}
+                    {ensembleDays.has(span.date) && <i title="NOAA GEFS ensemble mean">ENS</i>}
+                  </span>
+                </div>
+              );
+            })}
+
+            <div className="table-head table-label corner"><b>LOCAL TIME</b></div>
+            {columns.map((column, position) => (
+              <div
+                className={`table-head${night.has(column.index) ? ' night' : ''}${column.index === current ? ' current' : ''}${spans.some(span => span.from === position && position > 0) ? ' day-start' : ''}`}
+                key={column.index}
+              >
+                {formatHour(data?.hourly?.time?.[column.index])}
+                {night.has(column.index) && <em aria-label="after dark">☾</em>}
               </div>
-                {indexes.map(index => (
-                  <div className={`table-cell ${row.tier}${night.has(index) ? ' night' : ''}${index === current ? ' current' : ''}`} key={index}>
-                    {row.render(data, index)}
+            ))}
+
+            {rows.map((row, rowPosition) => (
+              <Fragment key={row.key}>
+                {row.group !== rows[rowPosition - 1]?.group && <>
+                  <div className="table-group table-label"><span>{row.group}</span></div>
+                  {columns.map(column => <div className="table-group-fill" key={column.index} />)}
+                </>}
+                <div className="table-row">
+                  <div className={`table-label ${row.tier}`}>
+                    <span className="label-text"><b>{row.label}</b><small>{row.unit}</small></span>
+                    <Sparkline data={data} seriesKey={row.key} indexes={indexes} tier={row.tier} />
                   </div>
-                ))}
-              </div>
-            </Fragment>
-          ))}
+                  {columns.map((column, position) => (
+                    <div
+                      className={`table-cell ${row.tier}${night.has(column.index) ? ' night' : ''}${column.index === current ? ' current' : ''}${spans.some(span => span.from === position && position > 0) ? ' day-start' : ''}`}
+                      key={column.index}
+                    >
+                      {row.render(data, column.index, {
+                        before: position > 0 ? columns[position - 1].index : null,
+                        after: position < columns.length - 1 ? columns[position + 1].index : null,
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </Fragment>
+            ))}
+          </div>
         </div>
       ) : (
-        <p className="notice">{subject} publishes no data for this day. Choose another day or source.</p>
+        <p className="notice">{subject} publishes no data for this range.</p>
       )}
       {rows.length > 0 && missingCopy.length > 0 && (
-        <p className="data-note">For this day: {missingCopy.join('; ')}.</p>
+        <p className="data-note">Across this range: {missingCopy.join('; ')}.</p>
       )}
       {rows.length > 0 && anyOffshore(data, indexes) && (
         <p className="data-note offshore-note">
