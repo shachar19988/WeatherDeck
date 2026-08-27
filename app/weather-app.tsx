@@ -538,12 +538,47 @@ function indexAtHour(data: Forecast | null, date: string, time: string | null) {
   return at < 0 ? null : at;
 }
 
+/**
+ * Re-stamps a saved session with the activity's current thresholds.
+ *
+ * The interface always judges with the live `PROFILES` entry, while Android
+ * judges with the numbers frozen into the session when it was saved. Left
+ * alone those drift apart the moment a threshold is tuned — and they have been
+ * tuned — so a trip would show one verdict on screen and be alerted on by
+ * rules that no longer exist anywhere in the app. `PROFILES` stays the single
+ * definition; this is what carries a change out to sessions already written.
+ */
+function stamped(session: Session): Session {
+  const profile = PROFILES.find(entry => entry.key === session.profile);
+  if (!profile) return session;
+  return { ...session, label: profile.label, limits: profile.limits };
+}
+
+/**
+ * The calendar date of a timestamp on this device's clock. toISOString() would
+ * answer in UTC, which east of Greenwich turns anything saved after midnight
+ * into the day before.
+ */
+function localDateOf(ms: number) {
+  const at = new Date(ms);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`;
+}
+
 function readSessions(): Session[] {
   const raw = readStorage(SESSIONS_KEY);
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as Session[];
-      if (Array.isArray(parsed)) return parsed.filter(entry => entry && typeof entry.date === 'string');
+      if (Array.isArray(parsed)) {
+        const live = parsed.filter(entry => entry && typeof entry.date === 'string').map(stamped);
+        // Written back, not just held in memory. Android reads storage, so
+        // re-stamping only the copy on screen would leave the notifications —
+        // the half that matters when the app is shut — running on the old
+        // rules, which is the bug this exists to close.
+        const rewritten = JSON.stringify(live);
+        if (rewritten !== raw) writeStorage(SESSIONS_KEY, rewritten);
+        return live;
+      }
     } catch { /* unreadable; fall through to the legacy single plan */ }
   }
   // One planned day used to live under its own key. Carry it across rather
@@ -1371,7 +1406,7 @@ export default function WeatherApp() {
   }
 
   function keepSessions(next: Session[]) {
-    const ordered = next.slice().sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
+    const ordered = next.map(stamped).sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
     setSessions(ordered);
     writeStorage(SESSIONS_KEY, JSON.stringify(ordered));
   }
@@ -2346,7 +2381,7 @@ function PlansView({ sessions, past, data, onAdd, onEdit, onRemove }: {
                   </small>
                   {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind')) && (
                     <small className="plan-change">
-                      since {dayLabel(new Date(session.setAt).toISOString().slice(0, 10)).dow}:{' '}
+                      since {dayLabel(localDateOf(session.setAt)).dow}:{' '}
                       {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind'))}
                     </small>
                   )}

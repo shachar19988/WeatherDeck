@@ -38,6 +38,7 @@ WeatherDeck is a personal, English-language Android weather dashboard. Keep it s
 - Keep location permission on demand: request it only after the user asks for GPS.
 - Only grant WebView geolocation to the private app origin.
 - The notification permission is held for one purpose: PlanWatch, which posts only when a planned session changes materially. Ask for it when a session is saved, never at launch, and do not widen it to anything else.
+- A saved session's `limits` are re-stamped from `PROFILES` on load and written back to storage, not just refreshed in memory. Android reads storage, so re-stamping only the copy on screen leaves the notifications running on superseded rules — the half that matters when the app is shut.
 - Sessions live in `weatherdeck:events` as a list, each carrying its own `limits` and `label` so Android needs no rules of its own. Baselines are keyed per session id and cleared when a session is deleted or edited — a stale baseline reports a change that never happened.
 - A session may name an hour. When it does, the verdict is about that hour alone, on both sides. Seven good hours are no comfort if none of them is the one you are on the water.
 - Android writes `weatherdeck:notify` into localStorage so the planner can say whether alerts actually work. That direction only — Java writes, the page reads. Do not install a JavaScript interface to make it two-way.
