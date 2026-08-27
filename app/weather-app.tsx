@@ -85,6 +85,22 @@ function banded(limits: number[]) {
   return limits.map((limit, index) => ({ limit, ...SEVERITY[index] }));
 }
 // Green to 10 kt, deepest red from 25 up.
+/**
+ * How far out the day is, which is a different thing from how rough it is. This
+ * used to be a card of its own above the graph; it now tints the day chips and
+ * the table's eyebrow instead, because a reliability hint that costs a block of
+ * screen is being charged more than it is worth.
+ */
+function confidenceAt(dayIndex: number) {
+  return dayIndex < 5
+    ? { label: 'High confidence', className: 'high', detail: 'Best operational guidance' }
+    : dayIndex < 10
+      ? { label: 'Medium confidence', className: 'medium', detail: 'Model differences are increasing' }
+      : dayIndex < 16
+        ? { label: 'Low confidence', className: 'low', detail: 'Use as planning guidance only' }
+        : { label: 'Very low confidence', className: 'very-low', detail: 'Experimental long-range trend' };
+}
+
 const WIND_SCALE = banded([10, 13, 16, 19, 22, 25, Infinity]);
 // Green to half a metre, deepest red from two up.
 const WAVE_SCALE = banded([0.5, 0.8, 1.1, 1.4, 1.7, 2, Infinity]);
@@ -972,6 +988,11 @@ export default function WeatherApp() {
         : 'At least two models are needed for a mean'
       : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
   const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
+  // The badge beside this already names the model, so for a single operational
+  // run the source line would only say it twice and wrap on a phone doing it.
+  // A mean or an ensemble carries its spread, which the badge does not.
+  const sourceWorthSaying = usingExtended || activeModel === 'MEAN' || !current;
+  const leadNote = sourceWorthSaying ? `${confidenceAt(dayIndex).label} · ${sourceDetail}` : confidenceAt(dayIndex).label;
 
   const profile = PROFILES.find(entry => entry.key === profileKey) ?? null;
   const planProfile = plan ? PROFILES.find(entry => entry.key === plan.profile) ?? null : null;
@@ -1041,13 +1062,7 @@ export default function WeatherApp() {
   const hasRainChance = hasSeries(forecastData, 'precipitation_probability');
   const hasCape = hasSeries(forecastData, 'cape');
 
-  const confidence = dayIndex < 5
-    ? { label: 'High confidence', className: 'high', detail: 'Best operational guidance' }
-    : dayIndex < 10
-      ? { label: 'Medium confidence', className: 'medium', detail: 'Model differences are increasing' }
-      : dayIndex < 16
-        ? { label: 'Low confidence', className: 'low', detail: 'Use as planning guidance only' }
-        : { label: 'Very low confidence', className: 'very-low', detail: 'Experimental long-range trend' };
+  const confidence = confidenceAt(dayIndex);
 
   const alertKey = hasSeries(current, 'wind_gusts_10m') ? 'wind_gusts_10m' : 'wind_speed_10m';
   const windAlertHit = useMemo(
@@ -1216,7 +1231,14 @@ export default function WeatherApp() {
             const label = dayLabel(day);
             const stats = dayStats[index];
             return (
-              <button type="button" className={dayIndex === index ? 'active' : ''} aria-pressed={dayIndex === index} key={day} onClick={() => setSelectedDay(index)}>
+              <button
+                type="button"
+                className={`lead-${confidenceAt(index).className}${dayIndex === index ? ' active' : ''}`}
+                aria-pressed={dayIndex === index}
+                title={`${confidenceAt(index).label} — ${confidenceAt(index).detail}`}
+                key={day}
+                onClick={() => setSelectedDay(index)}
+              >
                 <b>{label.dow}</b>
                 <span>{label.date}</span>
                 <i>{stats.low === null || stats.high === null ? '—' : `${Math.round(stats.low)}–${Math.round(stats.high)}°`}</i>
@@ -1311,11 +1333,6 @@ export default function WeatherApp() {
           : <p className="notice">No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.</p>
         )}
 
-        <section className={`confidence-bar ${confidence.className}`}>
-          <div><b>{confidence.label}</b><span>{confidence.detail}</span></div>
-          <small>{sourceDetail}</small>
-        </section>
-
         <ConditionsGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
 
         <ReadingTable
@@ -1325,7 +1342,9 @@ export default function WeatherApp() {
           focusDate={selectedDate}
           nowIndex={nowIndexFor(tableData)}
           rows={tableRows}
-          eyebrow="DETAILED FORECAST"
+          eyebrow={leadNote}
+          eyebrowTone={confidence.className}
+          eyebrowTitle={confidence.detail}
           title={`${days.length} days · every 3 hours`}
           badge={activeModel === 'MEAN' ? 'MODEL MEAN' : modelSubject}
           subject={modelSubject}
@@ -1861,7 +1880,7 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
  * table is its own scroll box with the date and hour rows pinned to the top and
  * the labels pinned to the left.
  */
-function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
+function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, eyebrowTone, eyebrowTitle, title, subject, footnote, action }: {
   data: Forecast | null;
   columns: { index: number; date: string }[];
   ensembleDays: Set<string>;
@@ -1870,6 +1889,8 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   rows: Row[];
   badge: string;
   eyebrow: string;
+  eyebrowTone?: string;
+  eyebrowTitle?: string;
   title: string;
   subject: string;
   footnote?: { group: string; text: string };
@@ -1954,7 +1975,7 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   return (
     <section className="forecast-card">
       <div className="section-title">
-        <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
+        <div><p className={`eyebrow${eyebrowTone ? ` lead-${eyebrowTone}` : ''}`} title={eyebrowTitle}>{eyebrow}</p><h2>{title}</h2></div>
         <div className="section-actions">{action}<span className="live-badge">{badge}</span></div>
       </div>
       {rows.length && columns.length ? (
