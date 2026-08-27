@@ -128,6 +128,16 @@ final class PlanWatch {
         WidgetData.prefs(context).edit().remove(KEY_LAST_HOURS).apply();
     }
 
+    /** "Fri Sep 4", to match the day the app itself shows. */
+    private static String readableDate(String date) {
+        try {
+            java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
+            return "on " + new java.text.SimpleDateFormat("EEE MMM d", java.util.Locale.US).format(iso.parse(date));
+        } catch (java.text.ParseException unreadable) {
+            return "on " + date;
+        }
+    }
+
     private static String today() {
         return new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
                 .format(new java.util.Date());
@@ -258,9 +268,13 @@ final class PlanWatch {
         manager.createNotificationChannel(new NotificationChannel(
                 CHANNEL, "Planned days", NotificationManager.IMPORTANCE_DEFAULT));
 
+        // Which way it moved, said outright. A lock screen is read in a glance
+        // and "5 h, was 7" makes you do the subtraction yourself.
+        String when = label + " " + readableDate(date);
         String headline = hours == 0
-                ? label + " on " + date + " no longer suits"
-                : label + " on " + date + ": " + hours + " h now, was " + baseline;
+                ? when + " no longer suits"
+                : (hours < baseline ? when + " is getting worse" : when + " is improving")
+                    + " — " + hours + " h, was " + baseline;
         Intent open = new Intent(context, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
