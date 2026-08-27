@@ -10,7 +10,6 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.TypedValue;
-import android.view.View;
 import android.widget.RemoteViews;
 import java.text.DateFormat;
 import java.util.Date;
@@ -132,19 +131,15 @@ public class WidgetProvider extends AppWidgetProvider {
 
         views.setTextViewText(R.id.widget_place, data.place);
         views.setTextViewText(R.id.widget_temp, range(data.tempLow, data.tempHigh, "°", 0));
+        views.setTextViewText(R.id.widget_wind, windLine(data));
         views.setTextViewText(R.id.widget_sea, seaLine(data));
         views.setTextViewText(R.id.widget_updated, updatedLabel(data));
 
-        // Today stays the widget's subject; a planned session is a note under it.
-        String session = PlanWatch.nextNote(context);
-        views.setViewVisibility(R.id.widget_session, session == null ? View.GONE : View.VISIBLE);
-        if (session != null) views.setTextViewText(R.id.widget_session, session);
-
         float scale = Math.max(0.9f, Math.min(1.8f, typeScale));
         setSize(views, R.id.widget_place, 13f * scale);
-        setSize(views, R.id.widget_session, 11f * scale);
         setSize(views, R.id.widget_temp, 34f * scale);
-        setSize(views, R.id.widget_sea, 15f * scale);
+        setSize(views, R.id.widget_wind, 14f * scale);
+        setSize(views, R.id.widget_sea, 14f * scale);
         setSize(views, R.id.widget_updated, 11f * scale);
 
         Intent open = new Intent(context, MainActivity.class)
@@ -159,17 +154,22 @@ public class WidgetProvider extends AppWidgetProvider {
     }
 
     /**
-     * Wind and sea on one line, spelled as tightly as they can be read.
+     * Wind and sea now have a line each.
      *
-     * A 2x2 is about 150dp across and the previous spacing did not fit, so the
-     * sea silently fell off the end — the widget looked like it had no wave data
-     * when it had it all along. Units lose their leading space and the separator
-     * loses its padding, which buys the eight characters the sea needs.
+     * Sharing one never worked: a 2x2 is about 130dp of usable width, and
+     * "2-8 kt · 0.5-0.7 m" needs more, so the sea was cut off the end and the
+     * widget looked like it had no wave data when it had it all along.
+     * Tightening the spacing bought a few characters and still lost. Two lines
+     * fit with room, and the space the planned-session note used to take is
+     * exactly what pays for the second one.
      */
+    private static String windLine(WidgetData data) {
+        return range(data.windLow, data.windHigh, " kt", 0);
+    }
+
     private static String seaLine(WidgetData data) {
-        String wind = range(data.windLow, data.windHigh, "kt", 0);
-        String wave = range(data.waveLow, data.waveHigh, "m", 1);
-        return "—".equals(wave) ? wind : wind + " · " + wave;
+        String wave = range(data.waveLow, data.waveHigh, " m", 1);
+        return "—".equals(wave) ? "No sea data here" : "Sea " + wave;
     }
 
     /** Missing readings stay missing — the widget never invents a number. */

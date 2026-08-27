@@ -153,16 +153,6 @@ final class PlanWatch {
         editor.apply();
     }
 
-    /** "Fri 4" — the widget has room for the day and little else. */
-    private static String shortDate(String date) {
-        try {
-            java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
-            return new java.text.SimpleDateFormat("EEE d", java.util.Locale.US).format(iso.parse(date));
-        } catch (java.text.ParseException unreadable) {
-            return date;
-        }
-    }
-
     /** "Fri Sep 4", to match the day the app itself shows. */
     private static String readableDate(String date) {
         try {
@@ -170,54 +160,6 @@ final class PlanWatch {
             return new java.text.SimpleDateFormat("EEE MMM d", java.util.Locale.US).format(iso.parse(date));
         } catch (java.text.ParseException unreadable) {
             return date;
-        }
-    }
-
-    /**
-     * The soonest session, for the widget's own line.
-     *
-     * The widget keeps showing today — that is what it is for — and this rides
-     * along underneath so a trip already in the diary is visible from the home
-     * screen without opening anything. The hours come from the count the
-     * background check already made; nothing is fetched for this.
-     */
-    static String nextNote(Context context) {
-        SharedPreferences prefs = WidgetData.prefs(context);
-        String raw = prefs.getString(KEY_PLAN, null);
-        if (raw == null || raw.isEmpty()) return null;
-        try {
-            JSONArray sessions = new JSONArray(raw);
-            String today = today();
-            JSONObject soonest = null;
-            for (int i = 0; i < sessions.length(); i++) {
-                JSONObject entry = sessions.optJSONObject(i);
-                if (entry == null) continue;
-                String date = entry.optString("date", "");
-                if (date.isEmpty() || date.compareTo(today) < 0) continue;
-                if (soonest == null || date.compareTo(soonest.optString("date", "")) < 0) soonest = entry;
-            }
-            if (soonest == null) return null;
-
-            String date = soonest.optString("date", "");
-            String time = soonest.isNull("time") ? null : soonest.optString("time", null);
-
-            /*
-             * Written to fit a 2x2, which is about twenty characters at this size.
-             * "Sailing on Fri Sep 4 at 09:00 · does not suit" did not, so it was
-             * cut mid-word and the verdict — the only part worth glancing at —
-             * was always the part that fell off. A leading tick or cross carries
-             * it in one character instead, and the month goes, since a date four
-             * days out does not need naming twice.
-             */
-            String key = LAST_HOURS_PREFIX + soonest.optString("id", date);
-            StringBuilder note = new StringBuilder();
-            if (prefs.contains(key)) note.append(prefs.getInt(key, 0) > 0 ? "✓ " : "✕ ");
-            note.append(soonest.optString("label", "Session"));
-            note.append(' ').append(shortDate(date));
-            if (time != null) note.append(' ').append(time);
-            return note.toString();
-        } catch (JSONException malformed) {
-            return null;
         }
     }
 

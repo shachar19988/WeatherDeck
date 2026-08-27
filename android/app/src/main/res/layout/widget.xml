@@ -22,22 +22,6 @@
         android:contentDescription="@string/widget_scene_description" />
 
     <TextView
-        android:id="@+id/widget_session"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:paddingStart="14dp"
-        android:paddingEnd="14dp"
-        android:paddingTop="31dp"
-        android:textColor="#7BE6C0"
-        android:textSize="11sp"
-        android:maxLines="1"
-        android:ellipsize="end"
-        android:visibility="gone"
-        android:shadowColor="#99000000"
-        android:shadowRadius="4" />
-
-    <TextView
         android:id="@+id/widget_place"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -75,13 +59,26 @@
             android:shadowRadius="5" />
 
         <TextView
-            android:id="@+id/widget_sea"
+            android:id="@+id/widget_wind"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingTop="2dp"
             android:text="@string/widget_placeholder"
             android:textColor="#F2FAFC"
-            android:textSize="15sp"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:shadowColor="#99000000"
+            android:shadowRadius="4" />
+
+        <TextView
+            android:id="@+id/widget_sea"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/widget_placeholder"
+            android:textColor="#9FD9E4"
+            android:textSize="14sp"
             android:textStyle="bold"
             android:maxLines="1"
             android:ellipsize="end"
