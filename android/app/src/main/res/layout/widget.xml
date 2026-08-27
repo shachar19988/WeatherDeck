@@ -84,6 +84,7 @@
             android:textSize="15sp"
             android:textStyle="bold"
             android:maxLines="1"
+            android:ellipsize="end"
             android:shadowColor="#99000000"
             android:shadowRadius="4" />
 

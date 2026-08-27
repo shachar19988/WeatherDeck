@@ -334,6 +334,53 @@ function shown(value: number | null, digits: number) {
   return value === null ? null : Number(value.toFixed(digits));
 }
 
+/**
+ * Lets a sheet be pushed back down with a thumb, which is how every other
+ * bottom sheet on the phone behaves — until now the only way out was the small
+ * × in the corner, and a drag did nothing at all.
+ *
+ * The drag is taken from the handle and title only. Starting it anywhere in the
+ * body would fight the sheet's own scrolling, and a settings panel that
+ * sometimes scrolls and sometimes closes under the same gesture is worse than
+ * one that never closes.
+ */
+function useSheetDrag(onClose: () => void) {
+  const from = useRef<number | null>(null);
+
+  // The sheet is found from the event rather than held in a ref: a ref passed
+  // in cannot be written through, and one returned would be read during render.
+  // The grip always sits inside the sheet, so the event already knows it.
+  const sheetOf = (event: React.TouchEvent) =>
+    (event.currentTarget as HTMLElement).closest('.sheet') as HTMLElement | null;
+
+  const move = (event: React.TouchEvent) => {
+    const node = sheetOf(event);
+    if (from.current === null || !node) return;
+    const travelled = Math.max(0, event.touches[0].clientY - from.current);
+    node.style.transition = 'none';
+    node.style.transform = `translateY(${travelled}px)`;
+  };
+
+  const end = (event: React.TouchEvent) => {
+    const node = sheetOf(event);
+    if (from.current === null || !node) return;
+    const travelled = Number(/translateY\((\d+(?:\.\d+)?)px\)/.exec(node.style.transform)?.[1] ?? 0);
+    from.current = null;
+    node.style.transition = '';
+    node.style.transform = '';
+    // A quarter of the sheet's own height, so a tall panel is not dismissed by
+    // the same flick that would barely move a short one.
+    if (travelled > node.getBoundingClientRect().height / 4) onClose();
+  };
+
+  return {
+    onTouchStart: (event: React.TouchEvent) => { from.current = event.touches[0].clientY; },
+    onTouchMove: move,
+    onTouchEnd: end,
+    onTouchCancel: end,
+  };
+}
+
 /** Drops the clauses whose reading is missing rather than printing "sea — m". */
 function clauses(...parts: (string | null)[]) {
   return parts.filter((part): part is string => part !== null).join(' · ');
@@ -1321,6 +1368,9 @@ export default function WeatherApp() {
   const [sessions, setSessions] = useState<Session[]>(() => readSessions(profilesWith(readLimitOverrides())));
   const [planOpen, setPlanOpen] = useState(false);
   const [tuning, setTuning] = useState('');
+  const searchGrip = useSheetDrag(() => setSearchOpen(false));
+  const planGrip = useSheetDrag(() => setPlanOpen(false));
+  const settingsGrip = useSheetDrag(() => setSettingsOpen(false));
   const [draft, setDraft] = useState({ id: '', date: '', time: '', profile: '' });
 
   const searchInput = useRef<HTMLInputElement | null>(null);
@@ -1646,6 +1696,15 @@ export default function WeatherApp() {
     setLocation(next); setSelectedDay(0); setSearchOpen(false); setSearch(''); setResults(NO_RESULTS); setGpsError('');
     writeStorage(LOCATION_KEY, JSON.stringify(next));
   }
+  /**
+   * Keeps the day strip pointing at whatever the table is showing. Guarded so a
+   * scroll that stays within the same day does not re-render the page.
+   */
+  function followTableDate(date: string) {
+    const at = days.indexOf(date);
+    if (at >= 0 && at !== dayIndex) setSelectedDay(at);
+  }
+
   function openNewSession() {
     setDraft({ id: '', date: selectedDate || days[0] || '', time: '', profile: profileKey || profiles[0].key });
     setPlanOpen(true);
@@ -1952,6 +2011,7 @@ export default function WeatherApp() {
           focusDate={selectedDate}
           nowIndex={nowIndexFor(tableData)}
           rows={tableRows}
+          onVisibleDate={followTableDate}
           eyebrow={leadNote}
           eyebrowTone={confidence.className}
           eyebrowTitle={confidence.detail}
@@ -2015,8 +2075,8 @@ export default function WeatherApp() {
         <div className="sheet-backdrop">
           <button type="button" className="sheet-dismiss" aria-label="Close location picker" onClick={() => setSearchOpen(false)} />
           <section className="sheet search-sheet" role="dialog" aria-modal="true" aria-label="Choose location">
-            <div className="sheet-handle" />
-            <div className="sheet-title"><h2>Choose location</h2><button type="button" onClick={() => setSearchOpen(false)} aria-label="Close">×</button></div>
+            <div className="sheet-handle" {...searchGrip} />
+            <div className="sheet-title" {...searchGrip}><h2>Choose location</h2><button type="button" onClick={() => setSearchOpen(false)} aria-label="Close">×</button></div>
             <div className="search-box">
               <span aria-hidden="true">⌕</span>
               <input ref={searchInput} value={search} onChange={event => setSearch(event.target.value)} placeholder="Search city or spot" aria-label="Search city or spot" />
@@ -2040,8 +2100,8 @@ export default function WeatherApp() {
         <div className="sheet-backdrop">
           <button type="button" className="sheet-dismiss" aria-label="Close planner" onClick={() => setPlanOpen(false)} />
           <section className="sheet plan-sheet" role="dialog" aria-modal="true" aria-label="Plan a session">
-            <div className="sheet-handle" />
-            <div className="sheet-title">
+            <div className="sheet-handle" {...planGrip} />
+            <div className="sheet-title" {...planGrip}>
               <h2>{draft.id ? 'Edit session' : 'Plan a session'}</h2>
               <button type="button" onClick={() => setPlanOpen(false)} aria-label="Close">×</button>
             </div>
@@ -2118,8 +2178,8 @@ export default function WeatherApp() {
         <div className="sheet-backdrop">
           <button type="button" className="sheet-dismiss" aria-label="Close preferences" onClick={() => setSettingsOpen(false)} />
           <section className="sheet settings-sheet" role="dialog" aria-modal="true" aria-label="Preferences">
-            <div className="sheet-handle" />
-            <div className="sheet-title"><h2>Preferences</h2><button type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">×</button></div>
+            <div className="sheet-handle" {...settingsGrip} />
+            <div className="sheet-title" {...settingsGrip}><h2>Preferences</h2><button type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">×</button></div>
             <label className="setting-row" htmlFor="wind-alert">
               <span><b>Wind alert</b><small>Banner when the next 24 h exceed this speed</small></span>
               <strong>{windAlert} kt</strong>
@@ -2163,16 +2223,33 @@ export default function WeatherApp() {
                       return (
                         <label className="limit-row" key={String(field.key)} htmlFor={`limit-${field.key}`}>
                           <span>{field.label}<em>{field.unit}</em></span>
-                          <input
-                            id={`limit-${field.key}`}
-                            type="number"
-                            inputMode="decimal"
-                            step={field.step}
-                            value={value ?? ''}
-                            placeholder={String(fallback)}
-                            onChange={event => setLimit(tuning, field.key,
-                              event.target.value === '' ? null : Number(event.target.value))}
-                          />
+                          <span className="limit-stepper">
+                            <button
+                              type="button"
+                              aria-label={`Lower ${field.label}`}
+                              onClick={() => setLimit(tuning, field.key,
+                                Number((((value ?? fallback) - field.step)).toFixed(2)))}
+                            >−</button>
+                            <input
+                              id={`limit-${field.key}`}
+                              type="number"
+                              inputMode="decimal"
+                              step={field.step}
+                              value={value ?? ''}
+                              placeholder={String(fallback)}
+                              /* Selects on focus: typing a new number should not
+                                 first require clearing the old one by hand. */
+                              onFocus={event => event.target.select()}
+                              onChange={event => setLimit(tuning, field.key,
+                                event.target.value === '' ? null : Number(event.target.value))}
+                            />
+                            <button
+                              type="button"
+                              aria-label={`Raise ${field.label}`}
+                              onClick={() => setLimit(tuning, field.key,
+                                Number((((value ?? fallback) + field.step)).toFixed(2)))}
+                            >+</button>
+                          </span>
                           {value !== undefined && value !== fallback && <b>was {fallback}</b>}
                         </label>
                       );
@@ -2483,7 +2560,9 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   render: (data, index, near) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index, near),
 }));
 
-function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, eyebrowTone, eyebrowTitle, title, subject, footnote, action }: {
+const COLUMN_WIDTH = 62;
+
+function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, eyebrowTone, eyebrowTitle, title, subject, footnote, action, onVisibleDate }: {
   data: Forecast | null;
   columns: { index: number; date: string }[];
   ensembleDays: Set<string>;
@@ -2498,6 +2577,7 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   subject: string;
   footnote?: { group: string; text: string };
   action?: ReactNode;
+  onVisibleDate?: (date: string) => void;
 }) {
   const header = useRef<HTMLDivElement | null>(null);
   const headerGrid = useRef<HTMLDivElement | null>(null);
@@ -2528,7 +2608,23 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
     const grid = headerGrid.current;
     if (grid) grid.style.transform = `translateX(${-left}px)`;
   };
-  const onBodyScroll = (event: React.UIEvent<HTMLDivElement>) => followHeader(event.currentTarget.scrollLeft);
+  /**
+   * The day chips follow the scroll, not just the other way round.
+   *
+   * Tapping a date jumps the table to it, but scrolling on from there left the
+   * old chip lit — the strip claimed you were on Friday while the columns under
+   * your thumb were Sunday's. Whatever is actually in view is what is marked.
+   *
+   * The label column is pinned over the first 104px, so the leading column not
+   * hidden behind it is the one the reader is on.
+   */
+  const onBodyScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const left = event.currentTarget.scrollLeft;
+    followHeader(left);
+    if (!onVisibleDate) return;
+    const column = columns[Math.min(columns.length - 1, Math.ceil(left / COLUMN_WIDTH))];
+    if (column) onVisibleDate(column.date);
+  };
 
   /**
    * Measured from the boxes themselves rather than offsetLeft: the day headers

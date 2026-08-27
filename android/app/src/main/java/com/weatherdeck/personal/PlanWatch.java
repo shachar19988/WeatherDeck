@@ -153,6 +153,16 @@ final class PlanWatch {
         editor.apply();
     }
 
+    /** "Fri 4" — the widget has room for the day and little else. */
+    private static String shortDate(String date) {
+        try {
+            java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
+            return new java.text.SimpleDateFormat("EEE d", java.util.Locale.US).format(iso.parse(date));
+        } catch (java.text.ParseException unreadable) {
+            return date;
+        }
+    }
+
     /** "Fri Sep 4", to match the day the app itself shows. */
     private static String readableDate(String date) {
         try {
@@ -190,17 +200,21 @@ final class PlanWatch {
 
             String date = soonest.optString("date", "");
             String time = soonest.isNull("time") ? null : soonest.optString("time", null);
-            StringBuilder note = new StringBuilder(soonest.optString("label", "Session"));
-            note.append(' ').append(readableDate(date));
-            if (time != null) note.append(' ').append(time);
 
+            /*
+             * Written to fit a 2x2, which is about twenty characters at this size.
+             * "Sailing on Fri Sep 4 at 09:00 · does not suit" did not, so it was
+             * cut mid-word and the verdict — the only part worth glancing at —
+             * was always the part that fell off. A leading tick or cross carries
+             * it in one character instead, and the month goes, since a date four
+             * days out does not need naming twice.
+             */
             String key = LAST_HOURS_PREFIX + soonest.optString("id", date);
-            if (prefs.contains(key)) {
-                int hours = prefs.getInt(key, 0);
-                // With an hour named the count is 1 or 0, so it reads as a verdict.
-                if (time != null) note.append(hours > 0 ? " · suits" : " · does not suit");
-                else note.append(" · ").append(hours).append(" h");
-            }
+            StringBuilder note = new StringBuilder();
+            if (prefs.contains(key)) note.append(prefs.getInt(key, 0) > 0 ? "✓ " : "✕ ");
+            note.append(soonest.optString("label", "Session"));
+            note.append(' ').append(shortDate(date));
+            if (time != null) note.append(' ').append(time);
             return note.toString();
         } catch (JSONException malformed) {
             return null;

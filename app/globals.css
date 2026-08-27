@@ -223,3 +223,10 @@
    version, rather than leaving "still broken" and "still the old APK"
    indistinguishable. */
 .build-stamp{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--accent)}
+
+/* Thresholds get steppers: on a phone, nudging a number beats selecting the old
+   one and retyping it. */
+.limit-stepper{display:flex;align-items:center;gap:5px}
+.limit-stepper button{width:34px;height:34px;min-width:34px;border:1px solid var(--line);border-radius:9px;background:#12262f;color:#c4d4d9;font-size:18px;line-height:1}
+.limit-stepper button:active{background:#17343e;color:var(--accent)}
+.limit-stepper input{width:62px}

@@ -158,10 +158,18 @@ public class WidgetProvider extends AppWidgetProvider {
         views.setTextViewTextSize(viewId, TypedValue.COMPLEX_UNIT_SP, sp);
     }
 
+    /**
+     * Wind and sea on one line, spelled as tightly as they can be read.
+     *
+     * A 2x2 is about 150dp across and the previous spacing did not fit, so the
+     * sea silently fell off the end — the widget looked like it had no wave data
+     * when it had it all along. Units lose their leading space and the separator
+     * loses its padding, which buys the eight characters the sea needs.
+     */
     private static String seaLine(WidgetData data) {
-        String wind = range(data.windLow, data.windHigh, " kt", 0);
-        String wave = range(data.waveLow, data.waveHigh, " m", 1);
-        return "—".equals(wave) ? wind : wind + "  ·  " + wave;
+        String wind = range(data.windLow, data.windHigh, "kt", 0);
+        String wave = range(data.waveLow, data.waveHigh, "m", 1);
+        return "—".equals(wave) ? wind : wind + " · " + wave;
     }
 
     /** Missing readings stay missing — the widget never invents a number. */
