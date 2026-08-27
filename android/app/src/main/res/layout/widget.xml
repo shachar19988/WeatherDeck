@@ -22,6 +22,22 @@
         android:contentDescription="@string/widget_scene_description" />
 
     <TextView
+        android:id="@+id/widget_session"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="31dp"
+        android:textColor="#7BE6C0"
+        android:textSize="11sp"
+        android:maxLines="1"
+        android:ellipsize="end"
+        android:visibility="gone"
+        android:shadowColor="#99000000"
+        android:shadowRadius="4" />
+
+    <TextView
         android:id="@+id/widget_place"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

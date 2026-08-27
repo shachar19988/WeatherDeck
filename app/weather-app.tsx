@@ -415,7 +415,72 @@ type Profile = {
  * it is the condition that takes a paddler out faster than they can come back —
  * and both want daylight. A yacht is not bound by either.
  */
-const PROFILES: Profile[] = [
+const LIMITS_KEY = 'weatherdeck:limits';
+type LimitOverrides = Record<string, Partial<Limits>>;
+
+/**
+ * Which numbers may be tuned, and what to call them.
+ *
+ * Only the ones already present in an activity's defaults are offered: a
+ * profile that never considered water temperature should not gain the idea
+ * because a field existed to type into.
+ */
+// The tunable half. daylight and noOffshore are structural rather than numeric
+// — whether a session needs light is not a dial — so they stay out.
+type NumericLimit = Exclude<keyof Limits, 'daylight' | 'noOffshore'>;
+const LIMIT_FIELDS: { key: NumericLimit; label: string; unit: string; step: number }[] = [
+  { key: 'windMin', label: 'Least wind', unit: 'kt', step: 1 },
+  { key: 'windMax', label: 'Most wind', unit: 'kt', step: 1 },
+  { key: 'gustMax', label: 'Most gust', unit: 'kt', step: 1 },
+  { key: 'waveMin', label: 'Least sea', unit: 'm', step: 0.1 },
+  { key: 'waveMax', label: 'Most sea', unit: 'm', step: 0.1 },
+  { key: 'swellMin', label: 'Least swell', unit: 'm', step: 0.1 },
+  { key: 'swellMax', label: 'Most swell', unit: 'm', step: 0.1 },
+  { key: 'swellPeriodMin', label: 'Least swell period', unit: 's', step: 1 },
+  { key: 'windWaveMax', label: 'Most chop', unit: 'm', step: 0.1 },
+  { key: 'periodMin', label: 'Least period', unit: 's', step: 1 },
+  { key: 'waterMin', label: 'Least water', unit: '°C', step: 1 },
+];
+
+function readLimitOverrides(): LimitOverrides {
+  const raw = readStorage(LIMITS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as LimitOverrides;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+
+/**
+ * The activities as they are actually judged: defaults with the user's own
+ * numbers laid over them.
+ *
+ * Tuning these used to mean editing the source, which made every adjustment a
+ * chance for the two halves of the app to disagree about the rules. There is
+ * still exactly one definition — it is just one the user can reach.
+ */
+function profilesWith(overrides: LimitOverrides): Profile[] {
+  return PROFILE_DEFAULTS.map(profile => {
+    const mine = overrides[profile.key];
+    if (!mine) return profile;
+    const limits = { ...profile.limits, ...mine };
+    return { ...profile, limits, hint: hintFor(limits) || profile.hint };
+  });
+}
+
+/** Rebuilt from the numbers, so an edited profile never describes itself wrongly. */
+function hintFor(limits: Limits) {
+  return clauses(
+    limits.windMin !== undefined && limits.windMax !== undefined ? `${limits.windMin}-${limits.windMax} kt`
+      : limits.windMax !== undefined ? `under ${limits.windMax} kt` : null,
+    limits.swellMin !== undefined && limits.swellMax !== undefined ? `swell ${limits.swellMin}-${limits.swellMax} m` : null,
+    limits.waveMax !== undefined ? `under ${limits.waveMax} m` : null,
+    limits.swellPeriodMin !== undefined ? `${limits.swellPeriodMin} s+` : null,
+    limits.waterMin !== undefined ? `${limits.waterMin}°C+` : null,
+  );
+}
+
+const PROFILE_DEFAULTS: Profile[] = [
   {
     key: 'sup',
     label: 'SUP',
@@ -548,8 +613,8 @@ function indexAtHour(data: Forecast | null, date: string, time: string | null) {
  * rules that no longer exist anywhere in the app. `PROFILES` stays the single
  * definition; this is what carries a change out to sessions already written.
  */
-function stamped(session: Session): Session {
-  const profile = PROFILES.find(entry => entry.key === session.profile);
+function stamped(session: Session, profiles: Profile[]): Session {
+  const profile = profiles.find(entry => entry.key === session.profile);
   if (!profile) return session;
   return { ...session, label: profile.label, limits: profile.limits };
 }
@@ -564,13 +629,14 @@ function localDateOf(ms: number) {
   return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`;
 }
 
-function readSessions(): Session[] {
+function readSessions(profiles: Profile[]): Session[] {
   const raw = readStorage(SESSIONS_KEY);
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as Session[];
       if (Array.isArray(parsed)) {
-        const live = parsed.filter(entry => entry && typeof entry.date === 'string').map(stamped);
+        const live = parsed.filter(entry => entry && typeof entry.date === 'string')
+          .map(entry => stamped(entry, profiles));
         // Written back, not just held in memory. Android reads storage, so
         // re-stamping only the copy on screen would leave the notifications —
         // the half that matters when the app is shut — running on the old
@@ -588,7 +654,7 @@ function readSessions(): Session[] {
   try {
     const old = JSON.parse(legacy) as Partial<Session>;
     if (!old || typeof old.date !== 'string') return [];
-    const profile = PROFILES.find(entry => entry.key === old.profile);
+    const profile = profiles.find(entry => entry.key === old.profile);
     if (!profile) return [];
     const carried: Session[] = [{
       id: `legacy-${old.date}`,
@@ -665,15 +731,142 @@ function sessionReading(data: Forecast | null, session: { date: string; time: st
  * card per trip on the front page would be exactly the clutter the tab exists
  * to avoid.
  */
-function firstTurned(sessions: Session[], data: Forecast | null) {
+function firstTurned(sessions: Session[], data: Forecast | null, profiles: Profile[]) {
   for (const entry of sessions) {
-    const chosen = PROFILES.find(item => item.key === entry.profile);
+    const chosen = profiles.find(item => item.key === entry.profile);
     if (!chosen) continue;
     const now = sessionReading(data, entry, chosen);
     const state = sessionState(entry, now);
     if (state === 'off' || state === 'worse') return { entry, now, state };
   }
   return null;
+}
+
+/**
+ * Which limit is actually doing the rejecting, and how far off it is.
+ *
+ * A day with no window is otherwise just blank, which tells you nothing and
+ * quietly makes the thresholds unfalsifiable — you cannot judge whether a rule
+ * is right for you if you never see it bite. Naming the binding constraint
+ * turns an empty day into a reason, and "wind to 18 kt" is also what tells you
+ * the rule is working rather than broken.
+ *
+ * The constraint reported is the one that fails most often across the day, not
+ * the first: an hour can fail several at once, and the one you keep hitting is
+ * the one worth knowing.
+ */
+function bindingReason(data: Forecast | null, date: string, profile: Profile) {
+  const indexes = indexesForDate(data, date);
+  if (!indexes.length) return null;
+  const limits = profile.limits;
+  const tally = new Map<string, { count: number; worst: number }>();
+  const note = (key: string, value: number | null) => {
+    const seen = tally.get(key) ?? { count: 0, worst: value ?? 0 };
+    tally.set(key, { count: seen.count + 1, worst: Math.max(seen.worst, value ?? 0) });
+  };
+
+  for (const index of indexes) {
+    const at = conditionsAt(data, index);
+    if (suitsLimits(at, limits)) return null; // Something fits; nothing is binding.
+    if (limits.daylight && !at.daylight) note('dark', null);
+    if (limits.noOffshore && at.offshore) note('offshore', null);
+    if (limits.windMax !== undefined && at.wind !== null && at.wind > limits.windMax) note('wind', at.wind);
+    if (limits.windMin !== undefined && at.wind !== null && at.wind < limits.windMin) note('calm', at.wind);
+    if (limits.gustMax !== undefined && (at.gust ?? 0) >= limits.gustMax) note('gust', at.gust);
+    if (limits.waveMax !== undefined && at.wave !== null && at.wave >= limits.waveMax) note('sea', at.wave);
+    if (limits.waveMin !== undefined && at.wave !== null && at.wave < limits.waveMin) note('flat', at.wave);
+    if (limits.swellMax !== undefined && at.swell !== null && at.swell >= limits.swellMax) note('swell', at.swell);
+    if (limits.swellMin !== undefined && at.swell !== null && at.swell < limits.swellMin) note('no swell', at.swell);
+    if (limits.swellPeriodMin !== undefined && (at.swellPeriod ?? 0) < limits.swellPeriodMin) note('short period', at.swellPeriod);
+    if (limits.windWaveMax !== undefined && (at.windWave ?? 0) >= limits.windWaveMax) note('chop', at.windWave);
+    if (limits.waterMin !== undefined && (at.water ?? -99) < limits.waterMin) note('cold water', at.water);
+  }
+
+  let top: { key: string; count: number; worst: number } | null = null;
+  for (const [key, seen] of tally) {
+    if (!top || seen.count > top.count) top = { key, ...seen };
+  }
+  if (!top) return null;
+  switch (top.key) {
+    case 'dark': return 'dark';
+    case 'offshore': return 'offshore wind';
+    case 'wind': return `wind to ${top.worst.toFixed(0)} kt`;
+    case 'calm': return 'too little wind';
+    case 'gust': return `gusts to ${top.worst.toFixed(0)} kt`;
+    case 'sea': return `sea to ${top.worst.toFixed(1)} m`;
+    case 'flat': return 'sea too flat';
+    case 'swell': return `swell to ${top.worst.toFixed(1)} m`;
+    case 'no swell': return 'not enough swell';
+    case 'short period': return 'swell too short';
+    case 'chop': return `chop to ${top.worst.toFixed(1)} m`;
+    case 'cold water': return 'water too cold';
+    default: return null;
+  }
+}
+
+/**
+ * The afternoon wind, named and timed.
+ *
+ * On this coast a westerly fills in most summer afternoons: measured over ten
+ * days at Haifa, nine of them rose 4 kt or more between morning and afternoon,
+ * arriving anywhere between 10:00 and 12:00. That the wind builds is not the
+ * news — the hour is. It is the difference between a flat-water paddle and
+ * carrying the board back up the beach.
+ *
+ * It is only called a sea breeze when the wind is actually coming off the
+ * water, which the coastline probe already knows. A land wind that strengthens
+ * in the afternoon is a different animal and gets a plainer name.
+ */
+const BREEZE_RISE_KT = 4;
+function breezeOn(data: Forecast | null, date: string, shore: ShoreMask | null) {
+  const indexes = indexesForDate(data, date);
+  if (!indexes.length) return null;
+  const hourAt = (index: number) => Number((data?.hourly?.time?.[index] || '').slice(11, 13));
+  const windIn = (from: number, to: number) => {
+    const values = indexes
+      .filter(index => hourAt(index) >= from && hourAt(index) <= to)
+      .map(index => reading(data, 'wind_speed_10m', index))
+      .filter((value): value is number => value !== null);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  };
+
+  const morning = windIn(6, 10);
+  const afternoon = windIn(13, 18);
+  if (morning === null || afternoon === null) return null;
+  const rise = afternoon - morning;
+  if (rise < BREEZE_RISE_KT) return null;
+
+  // Halfway up the rise: the point it has clearly arrived rather than the
+  // first flicker, which moves around with every model tweak.
+  const gate = morning + rise / 2;
+  const onset = indexes.find(index => {
+    const hour = hourAt(index);
+    const wind = reading(data, 'wind_speed_10m', index);
+    return hour >= 10 && hour <= 18 && wind !== null && wind >= gate;
+  });
+  if (onset === undefined) return null;
+
+  const afternoonHours = indexes.filter(index => hourAt(index) >= 13 && hourAt(index) <= 18);
+  /*
+   * Asked of the coastline mask directly rather than read off OFFSHORE_KEY.
+   * That series encodes offshore as 1 and everything else as null, so an
+   * onshore hour and an hour with no answer look identical — which is exactly
+   * the case here, since a sea breeze has no offshore hours at all.
+   */
+  const bearings = afternoonHours
+    .map(index => reading(data, 'wind_direction_10m', index))
+    .filter((value): value is number => value !== null);
+  const offshoreHours = shore ? bearings.filter(bearing => isOffshore(shore, bearing)).length : 0;
+  const known = Boolean(shore?.water) && bearings.length > 0;
+  const peak = Math.max(...afternoonHours
+    .map(index => reading(data, 'wind_speed_10m', index))
+    .filter((value): value is number => value !== null), 0);
+
+  return {
+    at: formatHour(data?.hourly?.time?.[onset]),
+    peak,
+    seaBreeze: known && offshoreHours * 2 < bearings.length,
+  };
 }
 
 /** off | worse | better | holding, from the day count and the named hour. */
@@ -1076,8 +1269,11 @@ export default function WeatherApp() {
   const [now, setNow] = useState(0);
   const [shore, setShore] = useState<ShoreMask | null>(null);
   const [profileKey, setProfileKey] = useState<string>(() => readStorage(PROFILE_KEY) || '');
-  const [sessions, setSessions] = useState<Session[]>(readSessions);
+  const [limitOverrides, setLimitOverrides] = useState<LimitOverrides>(readLimitOverrides);
+  const profiles = useMemo(() => profilesWith(limitOverrides), [limitOverrides]);
+  const [sessions, setSessions] = useState<Session[]>(() => readSessions(profilesWith(readLimitOverrides())));
   const [planOpen, setPlanOpen] = useState(false);
+  const [tuning, setTuning] = useState('');
   const [draft, setDraft] = useState({ id: '', date: '', time: '', profile: '' });
 
   const searchInput = useRef<HTMLInputElement | null>(null);
@@ -1274,7 +1470,7 @@ export default function WeatherApp() {
   const sourceWorthSaying = usingExtended || activeModel === 'MEAN' || !current;
   const leadNote = sourceWorthSaying ? `${confidenceAt(dayIndex).label} · ${sourceDetail}` : confidenceAt(dayIndex).label;
 
-  const profile = PROFILES.find(entry => entry.key === profileKey) ?? null;
+  const profile = profiles.find(entry => entry.key === profileKey) ?? null;
   const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
     const withSea = withSeries(withSeries(continuous, marine, MARINE_KEYS), consensus ?? undefined, WIND_AGREEMENT_KEYS);
@@ -1290,7 +1486,11 @@ export default function WeatherApp() {
     () => sessions.filter(entry => !todayHere || entry.date >= todayHere),
     [sessions, todayHere],
   );
-  const needsAttention = useMemo(() => firstTurned(upcoming, tableData), [upcoming, tableData]);
+  const needsAttention = useMemo(() => firstTurned(upcoming, tableData, profiles), [upcoming, tableData, profiles]);
+  const breeze = useMemo(
+    () => (selectedDate ? breezeOn(tableData, selectedDate, shore) : null),
+    [tableData, selectedDate, shore],
+  );
 
   // Every three-hourly slot of every day, in order — the table is one scroll
   // through the whole range rather than a view onto a chosen day.
@@ -1396,7 +1596,7 @@ export default function WeatherApp() {
     writeStorage(LOCATION_KEY, JSON.stringify(next));
   }
   function openNewSession() {
-    setDraft({ id: '', date: selectedDate || days[0] || '', time: '', profile: profileKey || PROFILES[0].key });
+    setDraft({ id: '', date: selectedDate || days[0] || '', time: '', profile: profileKey || profiles[0].key });
     setPlanOpen(true);
   }
 
@@ -1406,7 +1606,7 @@ export default function WeatherApp() {
   }
 
   function keepSessions(next: Session[]) {
-    const ordered = next.map(stamped).sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
+    const ordered = next.map(entry => stamped(entry, profiles)).sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
     setSessions(ordered);
     writeStorage(SESSIONS_KEY, JSON.stringify(ordered));
   }
@@ -1417,7 +1617,7 @@ export default function WeatherApp() {
    * the plan changed, so the old comparison no longer describes anything.
    */
   function saveDraft() {
-    const chosen = PROFILES.find(entry => entry.key === draft.profile);
+    const chosen = profiles.find(entry => entry.key === draft.profile);
     if (!chosen || !draft.date) return;
     const time = draft.time || null;
     const now = sessionReading(tableData, { date: draft.date, time }, chosen);
@@ -1435,6 +1635,35 @@ export default function WeatherApp() {
     };
     keepSessions([...sessions.filter(item => item.id !== entry.id), entry]);
     setPlanOpen(false);
+  }
+
+  /**
+   * Writes one threshold. Sessions are re-stamped in the same breath, so an
+   * edited rule reaches the trips already in the diary — and the storage they
+   * are watched from — rather than only the next one added.
+   */
+  function setLimit(profileKey: string, field: NumericLimit, value: number | null) {
+    const next: LimitOverrides = { ...limitOverrides };
+    const mine = { ...(next[profileKey] ?? {}) };
+    if (value === null || Number.isNaN(value)) delete mine[field];
+    else mine[field] = value;
+    if (Object.keys(mine).length) next[profileKey] = mine;
+    else delete next[profileKey];
+    setLimitOverrides(next);
+    writeStorage(LIMITS_KEY, JSON.stringify(next));
+    const restamped = sessions.map(entry => stamped(entry, profilesWith(next)));
+    setSessions(restamped);
+    writeStorage(SESSIONS_KEY, JSON.stringify(restamped));
+  }
+
+  function resetLimits(profileKey: string) {
+    const next: LimitOverrides = { ...limitOverrides };
+    delete next[profileKey];
+    setLimitOverrides(next);
+    writeStorage(LIMITS_KEY, JSON.stringify(next));
+    const restamped = sessions.map(entry => stamped(entry, profilesWith(next)));
+    setSessions(restamped);
+    writeStorage(SESSIONS_KEY, JSON.stringify(restamped));
   }
 
   function removeSession(id: string) {
@@ -1566,6 +1795,12 @@ export default function WeatherApp() {
           })}
         </section>
 
+        {breeze && (
+          <p className="breeze-note">
+            {breeze.seaBreeze ? 'Sea breeze' : 'Wind'} builds from about {breeze.at}, to {breeze.peak.toFixed(0)} kt
+          </p>
+        )}
+
         {needsAttention && (
           <button type="button" className={`plan-card ${needsAttention.state}`} onClick={() => setActiveView('Plans')}>
             <p className="plan-head">
@@ -1580,13 +1815,16 @@ export default function WeatherApp() {
               {clauses(
                 needsAttention.now.wave === null ? null : `sea ${needsAttention.now.wave.toFixed(1)} m`,
                 needsAttention.now.wind === null ? null : `${needsAttention.now.wind.toFixed(0)} kt`,
+                needsAttention.state === 'off'
+                  ? bindingReason(tableData, needsAttention.entry.date, profiles.find(e => e.key === needsAttention.entry.profile)!)
+                  : null,
               ) || 'no readings yet'}
             </small>
           </button>
         )}
 
         <section className="profile-strip" aria-label="Activity">
-          {PROFILES.map(entry => (
+          {profiles.map(entry => (
             <button
               type="button"
               key={entry.key}
@@ -1624,7 +1862,22 @@ export default function WeatherApp() {
               })}
             </div>
           )
-          : <p className="notice">No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.</p>
+          : (() => {
+            const blocked = days
+              .map(day => ({ day, why: bindingReason(tableData, day, profile) }))
+              .filter((entry): entry is { day: string; why: string } => entry.why !== null)
+              .slice(0, 3);
+            return (
+              <p className="notice">
+                No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.
+                {blocked.length > 0 && (
+                  <span className="notice-why">
+                    {blocked.map(entry => `${dayLabel(entry.day).dow} ${entry.why}`).join(' · ')}
+                  </span>
+                )}
+              </p>
+            );
+          })()
         )}
 
         <ReadingTable
@@ -1674,6 +1927,7 @@ export default function WeatherApp() {
           sessions={upcoming}
           past={sessions.filter(entry => !upcoming.includes(entry))}
           data={tableData}
+          profiles={profiles}
           onAdd={openNewSession}
           onEdit={editSession}
           onRemove={removeSession}
@@ -1755,7 +2009,7 @@ export default function WeatherApp() {
             <div className="field">
               <span>Activity</span>
               <div className="plan-profiles">
-                {PROFILES.map(entry => (
+                {profiles.map(entry => (
                   <button
                     type="button"
                     key={entry.key}
@@ -1769,7 +2023,7 @@ export default function WeatherApp() {
             </div>
 
             {draft.date && draft.profile && (() => {
-              const chosen = PROFILES.find(entry => entry.key === draft.profile);
+              const chosen = profiles.find(entry => entry.key === draft.profile);
               if (!chosen) return null;
               const preview = sessionReading(tableData, { date: draft.date, time: draft.time || null }, chosen);
               return (
@@ -1811,6 +2065,63 @@ export default function WeatherApp() {
               : notifyState === 'granted'
                 ? <p className="notice">System notifications are enabled. Alerts also appear in-app.</p>
                 : <button type="button" className="primary-action" onClick={enableAlerts} disabled={notifyState === 'denied'}>{notifyState === 'denied' ? 'Notifications blocked in browser settings' : 'Enable browser notifications'}</button>}
+            <div className="limits-box">
+              <p className="setting-head">Activity thresholds</p>
+              <p className="field-note">
+                What counts as suitable, in your numbers. Changing one updates the sessions already planned.
+              </p>
+              <div className="limit-tabs">
+                {profiles.map(entry => (
+                  <button
+                    type="button"
+                    key={entry.key}
+                    className={tuning === entry.key ? 'on' : ''}
+                    onClick={() => setTuning(tuning === entry.key ? '' : entry.key)}
+                  >
+                    {entry.label}
+                    {limitOverrides[entry.key] && <i aria-label="edited">·</i>}
+                  </button>
+                ))}
+              </div>
+              {tuning && (() => {
+                const live = profiles.find(entry => entry.key === tuning);
+                const base = PROFILE_DEFAULTS.find(entry => entry.key === tuning);
+                if (!live || !base) return null;
+                // Only the constraints this activity already has: a field to type
+                // into is an invitation to invent a rule that was never intended.
+                const fields = LIMIT_FIELDS.filter(field => base.limits[field.key] !== undefined);
+                return (
+                  <div className="limit-fields">
+                    {fields.map(field => {
+                      const value = live.limits[field.key] as number | undefined;
+                      const fallback = base.limits[field.key] as number;
+                      return (
+                        <label className="limit-row" key={String(field.key)} htmlFor={`limit-${field.key}`}>
+                          <span>{field.label}<em>{field.unit}</em></span>
+                          <input
+                            id={`limit-${field.key}`}
+                            type="number"
+                            inputMode="decimal"
+                            step={field.step}
+                            value={value ?? ''}
+                            placeholder={String(fallback)}
+                            onChange={event => setLimit(tuning, field.key,
+                              event.target.value === '' ? null : Number(event.target.value))}
+                          />
+                          {value !== undefined && value !== fallback && <b>was {fallback}</b>}
+                        </label>
+                      );
+                    })}
+                    {limitOverrides[tuning] && (
+                      <button type="button" className="reset-limits" onClick={() => resetLimits(tuning)}>
+                        Reset {live.label} to defaults
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
             <div className="about-box">
               <b>Data sources</b>
               <p>ECMWF, NOAA GFS, DWD ICON and ECMWF AIFS via Open-Meteo. Marine forecasts combine public wave and ocean models. Not every model publishes every variable — missing readings are shown as “—” and never estimated.</p>
@@ -2313,10 +2624,11 @@ function MapView({ location }: { location: Location }) {
  * storage so this page can say what is actually true rather than assuring you
  * of notifications that were refused months ago and never arrive.
  */
-function PlansView({ sessions, past, data, onAdd, onEdit, onRemove }: {
+function PlansView({ sessions, past, data, profiles, onAdd, onEdit, onRemove }: {
   sessions: Session[];
   past: Session[];
   data: Forecast | null;
+  profiles: Profile[];
   onAdd: () => void;
   onEdit: (session: Session) => void;
   onRemove: (id: string) => void;
@@ -2347,7 +2659,7 @@ function PlansView({ sessions, past, data, onAdd, onEdit, onRemove }: {
       )}
 
       {sessions.map(session => {
-        const profile = PROFILES.find(entry => entry.key === session.profile);
+        const profile = profiles.find(entry => entry.key === session.profile);
         if (!profile) return null;
         const now = sessionReading(data, session, profile);
         const state = sessionState(session, now);
@@ -2379,6 +2691,9 @@ function PlansView({ sessions, past, data, onAdd, onEdit, onRemove }: {
                       now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
                     ) || 'no readings yet'}
                   </small>
+                  {state === 'off' && bindingReason(data, session.date, profile) && (
+                    <small className="plan-why">held back by {bindingReason(data, session.date, profile)}</small>
+                  )}
                   {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind')) && (
                     <small className="plan-change">
                       since {dayLabel(localDateOf(session.setAt)).dow}:{' '}

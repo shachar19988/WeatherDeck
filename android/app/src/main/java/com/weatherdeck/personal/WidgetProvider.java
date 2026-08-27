@@ -10,6 +10,7 @@ import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.TypedValue;
+import android.view.View;
 import android.widget.RemoteViews;
 import java.text.DateFormat;
 import java.util.Date;
@@ -134,8 +135,14 @@ public class WidgetProvider extends AppWidgetProvider {
         views.setTextViewText(R.id.widget_sea, seaLine(data));
         views.setTextViewText(R.id.widget_updated, updatedLabel(data));
 
+        // Today stays the widget's subject; a planned session is a note under it.
+        String session = PlanWatch.nextNote(context);
+        views.setViewVisibility(R.id.widget_session, session == null ? View.GONE : View.VISIBLE);
+        if (session != null) views.setTextViewText(R.id.widget_session, session);
+
         float scale = Math.max(0.9f, Math.min(1.8f, typeScale));
         setSize(views, R.id.widget_place, 13f * scale);
+        setSize(views, R.id.widget_session, 11f * scale);
         setSize(views, R.id.widget_temp, 34f * scale);
         setSize(views, R.id.widget_sea, 15f * scale);
         setSize(views, R.id.widget_updated, 11f * scale);

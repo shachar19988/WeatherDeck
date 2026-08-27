@@ -157,9 +157,53 @@ final class PlanWatch {
     private static String readableDate(String date) {
         try {
             java.text.SimpleDateFormat iso = new java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US);
-            return "on " + new java.text.SimpleDateFormat("EEE MMM d", java.util.Locale.US).format(iso.parse(date));
+            return new java.text.SimpleDateFormat("EEE MMM d", java.util.Locale.US).format(iso.parse(date));
         } catch (java.text.ParseException unreadable) {
-            return "on " + date;
+            return date;
+        }
+    }
+
+    /**
+     * The soonest session, for the widget's own line.
+     *
+     * The widget keeps showing today — that is what it is for — and this rides
+     * along underneath so a trip already in the diary is visible from the home
+     * screen without opening anything. The hours come from the count the
+     * background check already made; nothing is fetched for this.
+     */
+    static String nextNote(Context context) {
+        SharedPreferences prefs = WidgetData.prefs(context);
+        String raw = prefs.getString(KEY_PLAN, null);
+        if (raw == null || raw.isEmpty()) return null;
+        try {
+            JSONArray sessions = new JSONArray(raw);
+            String today = today();
+            JSONObject soonest = null;
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject entry = sessions.optJSONObject(i);
+                if (entry == null) continue;
+                String date = entry.optString("date", "");
+                if (date.isEmpty() || date.compareTo(today) < 0) continue;
+                if (soonest == null || date.compareTo(soonest.optString("date", "")) < 0) soonest = entry;
+            }
+            if (soonest == null) return null;
+
+            String date = soonest.optString("date", "");
+            String time = soonest.isNull("time") ? null : soonest.optString("time", null);
+            StringBuilder note = new StringBuilder(soonest.optString("label", "Session"));
+            note.append(' ').append(readableDate(date));
+            if (time != null) note.append(' ').append(time);
+
+            String key = LAST_HOURS_PREFIX + soonest.optString("id", date);
+            if (prefs.contains(key)) {
+                int hours = prefs.getInt(key, 0);
+                // With an hour named the count is 1 or 0, so it reads as a verdict.
+                if (time != null) note.append(hours > 0 ? " · suits" : " · does not suit");
+                else note.append(" · ").append(hours).append(" h");
+            }
+            return note.toString();
+        } catch (JSONException malformed) {
+            return null;
         }
     }
 
@@ -317,7 +361,7 @@ final class PlanWatch {
 
         // Which way it moved, said outright. A lock screen is read in a glance
         // and "5 h, was 7" makes you do the subtraction yourself.
-        String when = label + " " + readableDate(date) + (time == null ? "" : " at " + time);
+        String when = label + " on " + readableDate(date) + (time == null ? "" : " at " + time);
         String headline;
         if (hours == 0) {
             headline = when + (time == null ? " no longer suits" : " no longer suits that hour");
