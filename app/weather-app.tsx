@@ -5,14 +5,28 @@ type Location = { name: string; country: string; latitude: number; longitude: nu
 type Series = (number | null)[];
 type Hourly = { time: string[] } & Record<string, Series | string[]>;
 type Forecast = { hourly: Hourly; hourly_units?: Record<string, string>; utc_offset_seconds?: number };
-type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS';
+type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS' | 'UKMO' | 'GEM';
 type ActiveModel = ModelKey | 'MEAN';
 type ViewKey = 'Forecast' | 'Map' | 'Saved';
 type DataSource = 'live' | 'cache' | 'none';
 type CachePayload = { forecasts: Partial<Record<ModelKey, Forecast>>; marine: Forecast | null; extended: Forecast | null; savedAt: number };
 
+/**
+ * Six models, chosen by measurement rather than by reputation.
+ *
+ * KNMI, DMI and MET Norway were tried and dropped: for this coast their series
+ * come back byte-identical to ECMWF, because their high-resolution domains stop
+ * well short of the eastern Mediterranean and they serve IFS instead. Adding
+ * them would have weighted ECMWF three times over inside a mean that claimed
+ * seven independent members.
+ *
+ * UKMO and GEM do differ here — 1.9 and 1.4 knots of mean absolute difference
+ * from ECMWF respectively — so they add real spread. Both run shorter than the
+ * others, which the table already handles by deciding coverage on the values.
+ */
 const MODEL_IDS: Record<ModelKey, string> = {
-  ECMWF: 'ecmwf_ifs', GFS: 'gfs_seamless', ICON: 'icon_global', AIFS: 'ecmwf_aifs025_single',
+  ECMWF: 'ecmwf_ifs', GFS: 'gfs_seamless', ICON: 'icon_global',
+  AIFS: 'ecmwf_aifs025_single', UKMO: 'ukmo_seamless', GEM: 'gem_seamless',
 };
 const MODEL_KEYS = Object.keys(MODEL_IDS) as ModelKey[];
 const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
@@ -20,6 +34,8 @@ const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
   GFS: { provider: 'NOAA', resolution: '11–25 km' },
   ICON: { provider: 'DWD', resolution: '11 km' },
   AIFS: { provider: 'ECMWF AI', resolution: '25 km' },
+  UKMO: { provider: 'UK Met Office', resolution: '10 km' },
+  GEM: { provider: 'Env. Canada', resolution: '15 km' },
 };
 const DEFAULT_LOCATION: Location = { name: 'Haifa', country: 'Israel', latitude: 32.794, longitude: 34.9896 };
 const WEATHER_VARS = 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cape,is_day';
@@ -52,12 +68,6 @@ const MODEL_ROW_PREFIX = 'model:';
  * worst case 4.86:1, which matters on a phone in direct sun as much as anywhere.
  * Each cell prints its number too, so colour is never the only channel.
  */
-// Waves are the graph's only single-colour mark, since wind is drawn straight
-// from the severity ramp. It has to be blue: the ramp already owns green through
-// red, and the orange first tried here sat 1.7 deltaE from the 25-30 kt band —
-// close enough that on a windy day the sea strip and the wind bars read as the
-// same thing. This clears every band by 27 and the panel surface by 6.3:1.
-const SERIES_WAVE = '#6da7ec';
 
 const WIND_SCALE = [
   { limit: 5, fill: '#0a6e3a', ink: '#ffffff' },
@@ -257,8 +267,33 @@ type Conditions = {
   period: number | null;
   offshore: boolean;
   daylight: boolean;
+  water: number | null;
 };
-type Profile = { key: string; label: string; hint: string; suits: (at: Conditions) => boolean };
+/** A value at the precision it is printed at, so badges agree with the numbers. */
+function shown(value: number | null, digits: number) {
+  return value === null ? null : Number(value.toFixed(digits));
+}
+
+/** Drops the clauses whose reading is missing rather than printing "sea — m". */
+function clauses(...parts: (string | null)[]) {
+  return parts.filter((part): part is string => part !== null).join(' · ');
+}
+
+type Spell = { start: number; end: number; hours: number; wind: number | null; wave: number | null; period: number | null; water: number | null };
+type Profile = {
+  key: string;
+  label: string;
+  hint: string;
+  suits: (at: Conditions) => boolean;
+  /** What makes this window worth taking, in the terms the sport is judged in. */
+  why: (spell: Spell) => string;
+  /**
+   * The reading that decides which window is the pick. Rounded to the precision
+   * it is displayed at, so the badge can never claim one sea is flatter than
+   * another while both print 0.4 m.
+   */
+  pick: { of: (spell: Spell) => number | null; best: 'low' | 'high'; label: string };
+};
 
 /**
  * The same forecast answers a different question for each thing you might do
@@ -281,6 +316,9 @@ const PROFILES: Profile[] = [
     label: 'SUP',
     hint: 'under 10 kt · under 0.6 m',
     suits: at => at.daylight && !at.offshore && at.wind !== null && at.wind < 10 && (at.wave ?? 0) < 0.6,
+    why: spell => clauses(spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`,
+      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
+    pick: { of: spell => shown(spell.wind, 0), best: 'low', label: 'lightest wind' },
   },
   {
     key: 'sup-surf',
@@ -288,12 +326,38 @@ const PROFILES: Profile[] = [
     hint: '0.6-1.5 m · 7 s+ · under 12 kt',
     suits: at => at.daylight && !at.offshore && at.wave !== null && at.wave >= 0.6 && at.wave <= 1.5
       && (at.period ?? 0) >= 7 && (at.wind ?? 99) < 12,
+    why: spell => clauses(spell.wave === null ? null : `${spell.wave.toFixed(1)} m`,
+      spell.period === null ? null : `${spell.period.toFixed(0)} s`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.period, 0), best: 'high', label: 'cleanest swell' },
   },
   {
     key: 'sail',
     label: 'Sailing',
     hint: '8-22 kt · gusts under 30',
     suits: at => at.wind !== null && at.wind >= 8 && at.wind <= 22 && (at.gust ?? 0) < 30 && (at.wave ?? 0) < 1.5,
+    why: spell => clauses(spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`,
+      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
+    pick: { of: spell => shown(spell.wind, 0), best: 'high', label: 'best breeze' },
+  },
+  {
+    key: 'dive',
+    label: 'Diving',
+    hint: 'under 0.5 m · under 12 kt',
+    suits: at => at.daylight && at.wave !== null && at.wave < 0.5 && (at.wind ?? 99) < 12,
+    why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'calmest surface' },
+  },
+  {
+    key: 'swim',
+    label: 'Swimming',
+    hint: 'under 0.5 m · under 15 kt · 22°C+',
+    suits: at => at.daylight && !at.offshore && at.wave !== null && at.wave < 0.5
+      && (at.wind ?? 99) < 15 && (at.water ?? 0) >= 22,
+    why: spell => clauses(spell.water === null ? null : `${spell.water.toFixed(0)}°C water`,
+      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
+    pick: { of: spell => shown(spell.water, 0), best: 'high', label: 'warmest water' },
   },
 ];
 
@@ -305,6 +369,7 @@ function conditionsAt(data: Forecast | null, index: number): Conditions {
     period: reading(data, 'wave_period', index),
     offshore: reading(data, OFFSHORE_KEY, index) === 1,
     daylight: reading(data, 'is_day', index) === 1,
+    water: reading(data, 'sea_surface_temperature', index),
   };
 }
 function withProfile(base: Forecast | null, profile: Profile | null): Forecast | null {
@@ -314,28 +379,46 @@ function withProfile(base: Forecast | null, profile: Profile | null): Forecast |
   return { ...base, hourly: hourly as Hourly };
 }
 
+function meanOver(data: Forecast | null, key: string, from: number, to: number) {
+  const values: number[] = [];
+  for (let index = from; index <= to; index += 1) {
+    const value = reading(data, key, index);
+    if (value !== null) values.push(value);
+  }
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
 /**
- * The longest unbroken run of suitable hours from now on, which is the question
- * actually being asked — not "is 14:00 good" but "when can I go".
- * Ties go to the earliest, because a window today beats the same window on
- * Thursday.
+ * Unbroken runs of suitable hours from now on, longest first — the question
+ * actually being asked is not "is 14:00 any good" but "when can I go", and the
+ * answer is more useful with an alternative attached. Ties go to the earlier
+ * run, because a window today beats the same window on Thursday.
  */
-function bestWindow(data: Forecast | null, from: number) {
+function bestWindows(data: Forecast | null, from: number, count: number): Spell[] {
   const times = data?.hourly?.time || [];
-  let best: { start: number; end: number; hours: number } | null = null;
+  const runs: Spell[] = [];
   let runStart = -1;
   for (let index = from; index <= times.length; index += 1) {
     const suitable = index < times.length && reading(data, MATCH_KEY, index) === 1;
     if (suitable && runStart < 0) runStart = index;
     if (!suitable && runStart >= 0) {
+      const end = index - 1;
       const hours = index - runStart;
-      if (hours >= MIN_WINDOW_HOURS && (!best || hours > best.hours)) {
-        best = { start: runStart, end: index - 1, hours };
+      if (hours >= MIN_WINDOW_HOURS) {
+        runs.push({
+          start: runStart,
+          end,
+          hours,
+          wind: meanOver(data, 'wind_speed_10m', runStart, end),
+          wave: meanOver(data, 'wave_height', runStart, end),
+          period: meanOver(data, 'wave_period', runStart, end),
+          water: meanOver(data, 'sea_surface_temperature', runStart, end),
+        });
       }
       runStart = -1;
     }
   }
-  return best;
+  return runs.sort((a, b) => (b.hours - a.hours) || (a.start - b.start)).slice(0, count);
 }
 
 // One wind row per model, in place of a separate comparison screen.
@@ -852,8 +935,7 @@ export default function WeatherApp() {
   );
   // No profile means no match series, so both of these fall out at zero without
   // needing a branch — which also keeps the memos ones the compiler can hold on to.
-  const spell = useMemo(() => bestWindow(tableData, nowIndexFor(tableData)), [tableData]);
-  const spellDate = spell ? tableData?.hourly?.time?.[spell.start]?.slice(0, 10) : undefined;
+  const spells = useMemo(() => bestWindows(tableData, nowIndexFor(tableData), 2), [tableData]);
   const matchesPerDay = useMemo(
     () => days.map(day => indexesForDate(tableData, day).filter(index => reading(tableData, MATCH_KEY, index) === 1).length),
     [days, tableData],
@@ -951,9 +1033,9 @@ export default function WeatherApp() {
     setProfileKey(next);
     writeStorage(PROFILE_KEY, next);
   }
-  function jumpToWindow() {
-    if (!spellDate) return;
-    const target = days.indexOf(spellDate);
+  function jumpToWindow(spell: Spell) {
+    const date = tableData?.hourly?.time?.[spell.start]?.slice(0, 10);
+    const target = date ? days.indexOf(date) : -1;
     if (target >= 0) setSelectedDay(target);
   }
   function changeWindAlert(value: number) {
@@ -1077,16 +1159,31 @@ export default function WeatherApp() {
           ))}
         </section>
 
-        {profile && (spell
+        {profile && (spells.length
           ? (
-            <button type="button" className="window-banner" onClick={jumpToWindow}>
-              <span>BEST {profile.label.toUpperCase()} WINDOW</span>
-              <strong>
-                {spellDate ? `${dayLabel(spellDate).dow} ` : ''}
-                {formatHour(tableData?.hourly?.time?.[spell.start])}–{formatHour(tableData?.hourly?.time?.[spell.end])}
-              </strong>
-              <small>{spell.hours} h · tap to jump</small>
-            </button>
+            <div className="window-list">
+              {spells.map((spell, position) => {
+                const date = tableData?.hourly?.time?.[spell.start]?.slice(0, 10);
+                const rival = spells[1 - position];
+                const mine = profile.pick.of(spell);
+                const theirs = rival ? profile.pick.of(rival) : null;
+                const isPick = mine !== null && theirs !== null
+                  && (profile.pick.best === 'low' ? mine < theirs : mine > theirs);
+                return (
+                  <button type="button" className="window-banner" key={spell.start} onClick={() => jumpToWindow(spell)}>
+                    <span>{position === 0 ? `LONGEST ${profile.label.toUpperCase()} WINDOW` : 'NEXT LONGEST'}</span>
+                    <strong>
+                      {date ? `${dayLabel(date).dow} ${dayLabel(date).date} · ` : ''}
+                      {formatHour(tableData?.hourly?.time?.[spell.start])}–{formatHour(tableData?.hourly?.time?.[spell.end])}
+                    </strong>
+                    <small>
+                      {spell.hours} h · {profile.why(spell)}
+                      {isPick && spells.length > 1 && <i>{profile.pick.label}</i>}
+                    </small>
+                  </button>
+                );
+              })}
+            </div>
           )
           : <p className="notice">No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.</p>
         )}
@@ -1455,42 +1552,17 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
   const yWind = (value: number) => windBase - (value / windCeiling) * GRAPH.windHeight;
 
   /**
-   * The sea is drawn as a sea, not as a chart of its height.
+   * Waves are bars in their own blue spectrum, built exactly like the wind bars
+   * above them.
    *
-   * An area plot of wave height is flat by nature — height barely moves across a
-   * day — so it reads as a sloping line that means nothing. Height also is not
-   * what anyone actually reads: a metre of long groundswell and a metre of short
-   * chop are different water. So the surface itself is drawn, with amplitude from
-   * the height and wavelength from the period. Long swell comes out as slow
-   * rollers, wind chop as tight ripples, which is the distinction that decides
-   * whether it is worth going.
-   *
-   * Wavelength varies along the day, so the phase has to be integrated as it
-   * goes rather than computed from x.
+   * A drawn sea surface was tried first and read as decoration: pretty, but you
+   * could not tell which hour was bigger. Two panels that share a shape share a
+   * way of being read, and the only thing that has to differ between them is
+   * what the colour means — green to red for wind, blue for sea, so a glance
+   * never confuses the two.
    */
-  const seaSurface = (() => {
-    const startX = centre(0);
-    const endX = centre(points.length - 1);
-    if (endX <= startX) return '';
-    const midY = GRAPH.waveTop + GRAPH.waveHeight * 0.55;
-    const maxAmplitude = GRAPH.waveHeight * 0.42;
-    const step = 1.5;
-    const crest: string[] = [];
-    let phase = 0;
-    for (let x = startX; x <= endX; x += step) {
-      const position = Math.round(((x - startX) / (endX - startX)) * (points.length - 1));
-      const point = points[Math.min(points.length - 1, Math.max(0, position))];
-      const height = point.wave ?? 0;
-      const period = point.period ?? 6;
-      const wavelength = Math.max(13, Math.min(58, 8 + period * 3.8));
-      phase += (2 * Math.PI * step) / wavelength;
-      const amplitude = (height / waveCeiling) * maxAmplitude;
-      crest.push(`${x.toFixed(1)},${(midY - Math.sin(phase) * amplitude).toFixed(1)}`);
-    }
-    if (crest.length < 2) return '';
-    const floorY = (GRAPH.waveTop + GRAPH.waveHeight).toFixed(1);
-    return `M${startX.toFixed(1)},${floorY} L${crest.join(' L')} L${endX.toFixed(1)},${floorY} Z`;
-  })();
+  const waveBase = GRAPH.waveTop + GRAPH.waveHeight;
+  const yWave = (value: number) => waveBase - (value / waveCeiling) * GRAPH.waveHeight;
   const typicalPeriod = (() => {
     const periods = points.map(point => point.period).filter((v): v is number => v !== null);
     return periods.length ? periods.reduce((sum, v) => sum + v, 0) / periods.length : null;
@@ -1612,9 +1684,19 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
           ))}
 
           {hasWave && <>
-            <path d={seaSurface} fill={SERIES_WAVE} fillOpacity="0.26" />
-            <path d={seaSurface} fill="none" stroke={SERIES_WAVE} strokeWidth="1.4" strokeLinejoin="round" />
-            <text x={GRAPH.left - 5} y={GRAPH.waveTop + GRAPH.waveHeight * 0.55 + 3} textAnchor="end" fill="#89a0aa" fontSize="9">sea</text>
+            {points.map((point, position) => point.wave !== null && (
+              <rect
+                key={point.index}
+                x={GRAPH.left + position * slot + 1}
+                y={yWave(point.wave)}
+                width={barWidth}
+                height={Math.max(1, waveBase - yWave(point.wave))}
+                rx="1.5"
+                fill={waveTone(point.wave).fill}
+              />
+            ))}
+            <text x={GRAPH.left - 5} y={GRAPH.waveTop + 8} textAnchor="end" fill="#89a0aa" fontSize="9">{waveCeiling.toFixed(1)}</text>
+            <text x={GRAPH.left - 5} y={waveBase + 3} textAnchor="end" fill="#5f7681" fontSize="9">m</text>
           </>}
 
           {/* No forced label on the last hour: next to the regular one it collides. */}
@@ -1671,9 +1753,15 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   const scroller = useRef<HTMLDivElement | null>(null);
   const indexes = useMemo(() => columns.map(column => column.index), [columns]);
 
-  // Measured from the boxes themselves rather than offsetLeft: the day headers
-  // are sticky, so their offsetParent is not the scroll box and offsetLeft
-  // answers a different question than the one being asked.
+  /**
+   * Measured from the boxes themselves rather than offsetLeft: the day headers
+   * are sticky, so their offsetParent is not the scroll box and offsetLeft
+   * answers a different question than the one being asked.
+   *
+   * The jump is instant. `behavior: 'smooth'` was silently doing nothing here,
+   * which is also what it does for anyone who has asked for reduced motion —
+   * a jump that only sometimes happens is worse than one that always does.
+   */
   useEffect(() => {
     const box = scroller.current;
     if (!box || !focusDate) return;
@@ -1682,7 +1770,7 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
     const label = box.querySelector<HTMLElement>('.table-label');
     const gutter = label ? label.getBoundingClientRect().width : 0;
     const delta = target.getBoundingClientRect().left - box.getBoundingClientRect().left - gutter;
-    box.scrollTo({ left: Math.max(0, box.scrollLeft + delta), behavior: 'smooth' });
+    box.scrollLeft = Math.max(0, box.scrollLeft + delta);
   }, [focusDate]);
 
   const night = new Set(indexes.filter(index => reading(data, 'is_day', index) === 0));

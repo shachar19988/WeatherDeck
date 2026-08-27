@@ -7,14 +7,16 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 - One continuous table: every three-hourly reading of the whole range — air and
   sea together, day after day — in a single horizontal scroll with the dates,
   hours and row labels pinned
-- ECMWF IFS, NOAA GFS, DWD ICON and ECMWF AIFS model selection, plus a MEAN
-  option that averages them with the hourly spread and contributing model count
+- Six models — ECMWF IFS, NOAA GFS, DWD ICON, ECMWF AIFS, UK Met Office and
+  Environment Canada GEM — plus a MEAN that averages them with the hourly spread
+  and contributing model count
 - Wind and waves graphed for the selected day at full hourly resolution: wind as
   bars coloured by strength with direction arrows above them, waves as their own
   strip below
 - A quiet offshore-wind warning, worked out for any coastline in the world
-- Activity profiles for SUP, SUP surfing and sailing that mark the hours that
-  suit, count them per day, and name the best window in the whole range
+- Activity profiles for SUP, SUP surfing, sailing, diving and swimming that mark
+  the hours that suit, count them per day, and name the two longest windows in
+  the whole range with the numbers that make them worth taking
 - Beaufort force alongside knots, and a tide curve with its highs and lows
 - Model comparison in place: one wind row per model, toggled on the same table
 - Wind carries a colour scale, hours after dark are shaded, and each day chip
@@ -29,6 +31,16 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
 - Automatic refresh every 30 minutes, on regaining connectivity, and on focus (throttled)
+
+### Choosing the models
+
+Six, chosen by measurement rather than reputation. KNMI, DMI and MET Norway were
+tried and dropped: for this coast their series come back byte-identical to ECMWF,
+because their high-resolution domains stop well short of the eastern
+Mediterranean and they serve IFS instead. Adding them would have weighted ECMWF
+three times over inside a mean claiming seven independent members. UKMO and GEM
+do differ here — 1.9 and 1.4 knots of mean absolute difference from ECMWF — so
+they earn their place.
 
 ### Activity profiles
 
