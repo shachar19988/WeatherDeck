@@ -1592,8 +1592,6 @@ export default function WeatherApp() {
           : <p className="notice">No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.</p>
         )}
 
-        <ConditionsGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
-
         <ReadingTable
           data={tableData}
           columns={tableColumns}
@@ -1840,6 +1838,65 @@ function spectrumCell(
     );
   });
 }
+/**
+ * Metres of sea, as a height inside the cell.
+ *
+ * 1.5 m rather than the 2 m the colour ramp tops out at, because the drawing
+ * has to spend the cell where the sea actually lives: measured over ten days at
+ * Haifa the total wave ran 0.38 to 1.36 m with a median of 0.52, so a 2 m scale
+ * left two thirds of every cell empty and every hour looking alike. Anything
+ * above 1.5 m draws full and is deep red by then anyway — past that point the
+ * colour carries the extreme and the shape carries the ordinary range, which is
+ * the half you actually read.
+ */
+const WAVE_DRAWN_MAX = 1.5;
+function waterLine(value: number) {
+  const share = Math.max(0, Math.min(1, value / WAVE_DRAWN_MAX));
+  return 88 - share * 76;
+}
+
+/**
+ * The wave row draws the sea it is describing.
+ *
+ * This replaces the panel that used to sit above the table. A graph of one
+ * chosen day answered "what does today look like" and the table answers "which
+ * hour, across two weeks" — so the graph was a second, smaller, worse copy of
+ * the row directly below it, and it cost a screenful.
+ *
+ * The surface is carried through the cell edges rather than drawn per cell: the
+ * left edge meets the previous column's height and the right edge meets the
+ * next one's, so the row is one continuous sea across the whole scroll instead
+ * of a line of separate tiles. Colour still carries severity, exactly as the
+ * wind row above; the shape carries size. Reading them together is what tells a
+ * building sea from a fading one at a glance.
+ */
+function waveCell(data: Forecast | null, key: string, index: number, near: Neighbours) {
+  return numberCell(data, key, index, value => {
+    const tone = waveTone(value);
+    const here = waterLine(value);
+    const edge = (at: number | null) => {
+      const neighbour = at === null ? null : reading(data, key, at);
+      return neighbour === null ? here : (here + waterLine(neighbour)) / 2;
+    };
+    const left = edge(near.before);
+    const right = edge(near.after);
+    // Two cubics through the three heights: the control points sit level with
+    // the points they leave, which is what keeps the joins smooth rather than
+    // kinked at every cell edge.
+    const path = `M0,${left.toFixed(1)} C25,${left.toFixed(1)} 25,${here.toFixed(1)} 50,${here.toFixed(1)}`
+      + ` C75,${here.toFixed(1)} 75,${right.toFixed(1)} 100,${right.toFixed(1)}`;
+    return (
+      <span className="wave-cell">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <path d={`${path} L100,100 L0,100 Z`} fill={tone.fill} opacity="0.5" />
+          <path d={path} fill="none" stroke={tone.fill} strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <b>{value.toFixed(1)}</b>
+      </span>
+    );
+  });
+}
+
 function windCell(data: Forecast | null, key: string, index: number, near: Neighbours) {
   return spectrumCell(data, key, index, near, windTone, value => value.toFixed(1));
 }
@@ -1965,7 +2022,7 @@ const MARINE_ROWS: Row[] = [
     label: 'Waves',
     unit: 'm',
     tier: 'lead',
-    render: (data, index, near) => spectrumCell(data, 'wave_height', index, near, waveTone, value => value.toFixed(1)),
+    render: (data, index, near) => waveCell(data, 'wave_height', index, near),
   },
   { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', tier: 'lead', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
   { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'sea_surface_temperature', index, near, tempTone, value => `${Math.round(value)}°`) },
@@ -2010,250 +2067,6 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   render: (data, index, near) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index, near),
 }));
 
-const GRAPH = { width: 320, left: 30, right: 10, arrowY: 13, windTop: 24, windHeight: 84, waveTop: 130, waveHeight: 40, tideTop: 182, tideHeight: 30 };
-
-function niceCeiling(value: number, step: number, floor: number) {
-  return Math.max(floor, Math.ceil(value / step) * step);
-}
-
-/**
- * Wind and waves for the selected day, hour by hour.
- *
- * Wind is bars rather than a curve: a bar carries its own colour, and colour is
- * how strength is read everywhere else in this app. A thin line at this size
- * carries neither well. Above them sits the reading the table buries and the sea
- * decides everything by — direction — with offshore hours marked, so the whole
- * question of whether a session is on can be answered without reading a number.
- *
- * Waves get their own strip below rather than a second line in the same box:
- * knots and metres are different scales and sharing an axis makes both unreadable.
- * The table below remains the accessible numeric equivalent.
- */
-function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
-  data: Forecast | null;
-  indexes: number[];
-  nowIndex: number;
-  threshold: number;
-}) {
-  const [hover, setHover] = useState<number | null>(null);
-
-  const points = indexes
-    .map(index => ({
-      index,
-      time: data?.hourly?.time?.[index],
-      wind: reading(data, 'wind_speed_10m', index),
-      direction: reading(data, 'wind_direction_10m', index),
-      wave: reading(data, 'wave_height', index),
-      period: reading(data, 'wave_period', index),
-      tide: reading(data, 'sea_level_height_msl', index),
-      offshore: reading(data, OFFSHORE_KEY, index) === 1,
-      night: reading(data, 'is_day', index) === 0,
-    }))
-    .filter(point => point.wind !== null);
-  if (points.length < 2) return null;
-
-  const hasWave = points.some(point => point.wave !== null);
-  const tideValues = points.map(point => point.tide).filter((value): value is number => value !== null);
-  const hasTide = tideValues.length > 3;
-  const height = hasTide ? 230 : hasWave ? 190 : 132;
-  const labelY = height - 8;
-  const plotWidth = GRAPH.width - GRAPH.left - GRAPH.right;
-  const slot = plotWidth / points.length;
-  const barWidth = Math.max(2, slot - 2);
-  const centre = (position: number) => GRAPH.left + position * slot + slot / 2;
-
-  const windCeiling = niceCeiling(Math.max(...points.map(point => point.wind ?? 0), threshold), 5, 10);
-  const waveCeiling = niceCeiling(Math.max(...points.map(point => point.wave ?? 0)), 0.5, 1);
-  const windBase = GRAPH.windTop + GRAPH.windHeight;
-  const yWind = (value: number) => windBase - (value / windCeiling) * GRAPH.windHeight;
-
-  /**
-   * Waves are bars in their own blue spectrum, built exactly like the wind bars
-   * above them.
-   *
-   * A drawn sea surface was tried first and read as decoration: pretty, but you
-   * could not tell which hour was bigger. Two panels that share a shape share a
-   * way of being read, and the only thing that has to differ between them is
-   * what the colour means — green to red for wind, blue for sea, so a glance
-   * never confuses the two.
-   */
-  const waveBase = GRAPH.waveTop + GRAPH.waveHeight;
-  const yWave = (value: number) => waveBase - (value / waveCeiling) * GRAPH.waveHeight;
-  const typicalPeriod = (() => {
-    const periods = points.map(point => point.period).filter((v): v is number => v !== null);
-    return periods.length ? periods.reduce((sum, v) => sum + v, 0) / periods.length : null;
-  })();
-
-  /**
-   * Tide, drawn to its own range rather than a fixed scale. A twenty-centimetre
-   * Mediterranean swing and a four-metre Atlantic one are both the whole story
-   * where they happen, and the numbers on the marks carry the absolute size.
-   */
-  const tideLow = hasTide ? Math.min(...tideValues) : 0;
-  const tideSpan = hasTide ? Math.max(...tideValues) - tideLow || 1 : 1;
-  const yTide = (value: number) => GRAPH.tideTop + GRAPH.tideHeight - ((value - tideLow) / tideSpan) * GRAPH.tideHeight;
-  const tidePath = hasTide
-    ? points
-      .map((point, position) => (point.tide === null ? null : `${position === 0 ? 'M' : 'L'}${centre(position).toFixed(1)},${yTide(point.tide).toFixed(1)}`))
-      .filter(Boolean)
-      .join(' ')
-    : '';
-  const tideMarks = hasTide
-    ? points
-      .map((point, position) => ({ point, position }))
-      .filter(({ point, position }) => {
-        const before = points[position - 1]?.tide;
-        const after = points[position + 1]?.tide;
-        if (point.tide === null || before === null || after === null || before === undefined || after === undefined) return false;
-        return (point.tide > before && point.tide >= after) || (point.tide < before && point.tide <= after);
-      })
-    : [];
-
-  const peakWind = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
-  const peakWave = Math.max(...points.map(point => point.wave ?? 0));
-  const active = hover === null ? null : points[hover];
-  const nowAt = points.findIndex(point => point.index === nowIndex);
-  const bottom = hasTide
-    ? GRAPH.tideTop + GRAPH.tideHeight
-    : hasWave ? GRAPH.waveTop + GRAPH.waveHeight : windBase;
-  const arrowEvery = Math.max(1, Math.round(points.length / 8));
-
-  const onPointer = (event: React.PointerEvent<SVGSVGElement>) => {
-    const box = event.currentTarget.getBoundingClientRect();
-    const ratio = ((event.clientX - box.left) / box.width) * GRAPH.width;
-    setHover(Math.max(0, Math.min(points.length - 1, Math.floor((ratio - GRAPH.left) / slot))));
-  };
-
-  return (
-    <section className="graph-card">
-      <div className="section-title">
-        <div>
-          <p className="eyebrow">THROUGH THE DAY</p>
-          <h2>Wind to {fixed(peakWind.wind, 0)} kt</h2>
-          {hasWave && (
-            <p className="graph-sub">Sea {peakWave.toFixed(1)} m{typicalPeriod ? ` at ${typicalPeriod.toFixed(0)} s` : ''}</p>
-          )}
-        </div>
-        <div className="graph-legend">
-          {/* No unit: the same ramp now serves both panels on their own scales. */}
-          <span className="ramp-legend">
-            <b>calm</b>
-            {SEVERITY.map(band => <i key={band.fill} style={{ background: band.fill }} />)}
-            <b>rough</b>
-          </span>
-        </div>
-      </div>
-      <div className="graph-frame">
-        <svg
-          viewBox={`0 0 ${GRAPH.width} ${height}`}
-          role="img"
-          aria-label={`Wind and waves through the day. Wind peaks at ${fixed(peakWind.wind, 0)} knots${hasWave ? `, waves at ${peakWave.toFixed(1)} metres` : ''}. The table below carries the same readings.`}
-          onPointerMove={onPointer}
-          onPointerLeave={() => setHover(null)}
-        >
-          {points.map((point, position) => point.night && (
-            <rect key={point.index} x={GRAPH.left + position * slot} y={GRAPH.windTop} width={slot} height={bottom - GRAPH.windTop} fill="#0a1c25" />
-          ))}
-
-          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(windCeiling)} y2={yWind(windCeiling)} stroke="#24414d" strokeWidth="1" />
-          <text x={GRAPH.left - 5} y={yWind(windCeiling) + 3} textAnchor="end" fill="#89a0aa" fontSize="9">{windCeiling}</text>
-          <text x={GRAPH.left - 5} y={windBase + 3} textAnchor="end" fill="#89a0aa" fontSize="9">0</text>
-
-          {points.map((point, position) => {
-            const tone = windTone(point.wind ?? 0);
-            const top = yWind(point.wind ?? 0);
-            return (
-              <rect
-                key={point.index}
-                x={GRAPH.left + position * slot + 1}
-                y={top}
-                width={barWidth}
-                height={Math.max(1, windBase - top)}
-                rx="1.5"
-                fill={tone.fill}
-              />
-            );
-          })}
-
-          <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={yWind(threshold)} y2={yWind(threshold)} stroke="#edf6f7" strokeWidth="1" strokeDasharray="3 3" strokeOpacity="0.65" />
-          <text x={GRAPH.width - GRAPH.right} y={yWind(threshold) - 3} textAnchor="end" fill="#c3d3d9" fontSize="9">alert {threshold}</text>
-
-          {hasTide && <>
-            <path d={tidePath} fill="none" stroke="#4aa596" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" />
-            {tideMarks.map(({ point, position }) => (
-              <g key={point.index}>
-                <circle cx={centre(position)} cy={yTide(point.tide ?? 0)} r="2" fill="#4aa596" />
-                {/* Always above the dot: hung below, a low-tide label lands on the hour axis. */}
-                <text x={centre(position)} y={yTide(point.tide ?? 0) - 5} textAnchor="middle" fill="#8fb0bc" fontSize="8">
-                  {formatHour(point.time)}
-                </text>
-              </g>
-            ))}
-            <text x={GRAPH.left - 5} y={GRAPH.tideTop + GRAPH.tideHeight * 0.6} textAnchor="end" fill="#5f7681" fontSize="9">tide</text>
-          </>}
-
-          {points.map((point, position) => (position % arrowEvery === 0 && point.direction !== null) && (
-            <path
-              key={point.index}
-              d="M0,-3.8 L2.5,3.2 L0,1.5 L-2.5,3.2 Z"
-              fill={point.offshore ? '#db7548' : '#9fb6bf'}
-              transform={`translate(${centre(position).toFixed(1)},${GRAPH.arrowY}) rotate(${point.direction})`}
-            />
-          ))}
-
-          {hasWave && <>
-            {points.map((point, position) => point.wave !== null && (
-              <rect
-                key={point.index}
-                x={GRAPH.left + position * slot + 1}
-                y={yWave(point.wave)}
-                width={barWidth}
-                height={Math.max(1, waveBase - yWave(point.wave))}
-                rx="1.5"
-                fill={waveTone(point.wave).fill}
-              />
-            ))}
-            <text x={GRAPH.left - 5} y={GRAPH.waveTop + 8} textAnchor="end" fill="#89a0aa" fontSize="9">{waveCeiling.toFixed(1)}</text>
-            <text x={GRAPH.left - 5} y={waveBase + 3} textAnchor="end" fill="#5f7681" fontSize="9">m</text>
-          </>}
-
-          {/* No forced label on the last hour: next to the regular one it collides. */}
-          {points.map((point, position) => position % arrowEvery === 0 && (
-            <text key={point.index} x={centre(position)} y={labelY} textAnchor="middle" fill="#89a0aa" fontSize="9">{formatHour(point.time)}</text>
-          ))}
-
-          {nowAt >= 0 && <line x1={centre(nowAt)} x2={centre(nowAt)} y1={GRAPH.windTop} y2={bottom} stroke="#38e3b1" strokeWidth="1.5" />}
-          {active && <line x1={centre(hover ?? 0)} x2={centre(hover ?? 0)} y1={GRAPH.windTop} y2={bottom} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.55" />}
-        </svg>
-        {active && (
-          <p className="graph-tooltip">
-            <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt {cardinal(active.direction)}
-            {active.wave !== null && <> · {active.wave.toFixed(1)} m{active.period !== null ? ` @ ${active.period.toFixed(0)} s` : ''}</>}
-            {active.tide !== null && <> · tide {active.tide.toFixed(2)} m</>}
-            {active.offshore && <em> offshore</em>}
-          </p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-// The column count travels to the grid as a custom property rather than a full
-// grid-template-columns value, so the responsive rules in the stylesheet still
-// win over the inline style.
-/**
- * One table for the whole range.
- *
- * Days used to be a filter: pick one, see eight columns. Reading Friday against
- * Saturday meant tapping between them and holding the numbers in your head. Now
- * the days run on, separated by a rule and headed by their date, and the day
- * strip above scrolls here instead of swapping the contents.
- *
- * That makes the header the load-bearing part: scrolled anywhere but the top
- * left, a column of numbers says neither which hour nor which day it is. So the
- * table is its own scroll box with the date and hour rows pinned to the top and
- * the labels pinned to the left.
- */
 function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, eyebrowTone, eyebrowTitle, title, subject, footnote, action }: {
   data: Forecast | null;
   columns: { index: number; date: string }[];
