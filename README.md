@@ -13,6 +13,9 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
   bars coloured by strength with direction arrows above them, waves as their own
   strip below
 - A quiet offshore-wind warning, worked out for any coastline in the world
+- Activity profiles for SUP, SUP surfing and sailing that mark the hours that
+  suit, count them per day, and name the best window in the whole range
+- Beaufort force alongside knots, and a tide curve with its highs and lows
 - Model comparison in place: one wind row per model, toggled on the same table
 - Wind carries a colour scale, hours after dark are shaded, and each day chip
   shows that day's temperature range and strongest wind
@@ -26,6 +29,30 @@ WeatherDeck is a personal, English-language Android weather dashboard inspired b
 - Wind-alert threshold with an in-app banner
 - Offline cache of the last successful forecast, clearly labelled as such
 - Automatic refresh every 30 minutes, on regaining connectivity, and on focus (throttled)
+
+### Activity profiles
+
+The same forecast answers a different question for each thing you might do with
+it: 12 kt is a good afternoon on a yacht and the end of a paddle. Picking SUP,
+SUP surf or sailing marks the hours that suit it, counts them on each day chip,
+and names the longest run from now on — because the question is rarely "is 14:00
+any good" and almost always "when can I go".
+
+Each profile shows its own thresholds on its chip. They are guesses about someone
+else's sport and they should be easy to disagree with. Offshore wind rules out
+both board profiles whatever else is true, and both want daylight; a yacht is
+bound by neither.
+
+The flat-water ceiling is 0.6 m rather than the 0.4 m first tried. Measured
+against ten days of this coast, the sea never once dropped below 0.38 m and 0.4 m
+qualified nine daylight hours out of a hundred and thirty. A profile that can
+never light up is no more use than one that never goes out.
+
+The ensemble publishes no daylight flag, so beyond the operational range every
+hour read as unknown — and an unknown that counted as daylight quietly turned
+every night out there into a paddling window, once producing a "best SUP window"
+of twenty-one hours. Daylight is astronomy rather than forecast, so the pattern
+from the last day that does publish it is now carried forward by hour of day.
 
 ## Home-screen widget
 

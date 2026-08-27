@@ -89,3 +89,20 @@
 .table-group.table-label{padding-left:7px}
 .table-label{position:sticky;left:0;z-index:2;background:var(--panel)}
 .table-cell.day-start,.table-head.day-start,.table-day.day-start{box-shadow:inset 2px 0 0 #35606e}
+.cloud-dial{display:block;width:16px;height:16px;border-radius:50%;border:1px solid #4a626d;background:conic-gradient(#b6c7cd 0 var(--cover,0%),transparent var(--cover,0%))}
+.wind-summary .beaufort{margin-top:3px;color:#8fb0bc}
+.profile-strip{display:flex;gap:7px;overflow:auto;margin:0 0 11px;scrollbar-width:none}
+.profile-strip button{flex:0 0 auto;border:1px solid var(--line);background:#0e252e;color:var(--muted);border-radius:13px;padding:8px 12px;text-align:left}
+.profile-strip b,.profile-strip small{display:block}
+.profile-strip b{font-size:11px;font-weight:900;letter-spacing:.04em}
+.profile-strip small{font-size:8px;margin-top:3px;color:#6f8791}
+.profile-strip .active{background:var(--accent);border-color:var(--accent);color:#062018}
+.profile-strip .active small{color:#17624e}
+.window-banner{display:block;width:100%;text-align:left;border:1px solid #2f6a5c;background:#0f2b2a;border-radius:14px;padding:12px 14px;margin:0 0 11px;color:var(--ink)}
+.window-banner span{display:block;font-size:8px;font-weight:900;letter-spacing:.14em;color:var(--accent)}
+.window-banner strong{display:block;font-size:18px;margin:5px 0 3px;letter-spacing:-.02em}
+.window-banner small{display:block;font-size:9px;color:var(--muted)}
+.days-strip u{display:block;text-decoration:none;margin-top:4px;font-size:8px;font-weight:900;color:var(--accent)}
+.days-strip .active u{color:#062018}
+.table-head.suits{box-shadow:inset 0 3px 0 var(--accent)}
+.table-head.suits.current{box-shadow:inset 0 3px 0 var(--accent),inset 1px 0 0 var(--accent),inset -1px 0 0 var(--accent)}
