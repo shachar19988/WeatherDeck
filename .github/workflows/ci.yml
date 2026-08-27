@@ -12,6 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # Depth 2 so the build stamp can reach HEAD^2 — on a pull_request run
+        # the checkout is a merge commit whose second parent is the branch head,
+        # and at depth 1 that parent is not there to resolve.
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -26,6 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        # Depth 2 so the build stamp can reach HEAD^2 — on a pull_request run
+        # the checkout is a merge commit whose second parent is the branch head,
+        # and at depth 1 that parent is not there to resolve.
+        with:
+          fetch-depth: 2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
