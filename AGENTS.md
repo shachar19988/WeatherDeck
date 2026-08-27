@@ -34,6 +34,7 @@ WeatherDeck is a personal, English-language Android weather dashboard. Keep it s
 ## Android rules
 
 - Run `npm run build` before Gradle so `dist/index.html` and hashed assets exist.
+- System bar insets are applied natively, by padding the root view in `MainActivity.keepClearOfSystemBars`. Do not move this to CSS `env(safe-area-inset-*)`: that relies on the WebView reporting insets into the page, which varies by Android and WebView version, and this app runs from API 26. From targetSdk 35 the window is laid out edge to edge and `statusBarColor` is ignored, so without the padding the header draws under the clock.
 - Keep location permission on demand: request it only after the user asks for GPS.
 - Only grant WebView geolocation to the private app origin.
 - The notification permission is held for one purpose: PlanWatch, which posts only when a planned session changes materially. Ask for it when a session is saved, never at launch, and do not widen it to anything else.

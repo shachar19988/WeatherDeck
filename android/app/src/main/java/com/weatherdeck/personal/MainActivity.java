@@ -9,11 +9,13 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
 import android.webkit.ServiceWorkerClient;
@@ -73,6 +75,7 @@ public class MainActivity extends Activity {
         webView.setVisibility(View.INVISIBLE);
         root.addView(webView, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        keepClearOfSystemBars(root);
 
         if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
@@ -138,6 +141,45 @@ public class MainActivity extends Activity {
         });
 
         webView.loadUrl(APP_ORIGIN + "/index.html");
+    }
+
+    /**
+     * Keeps the page out from under the status and navigation bars.
+     *
+     * From targetSdk 35 Android lays the window out edge to edge and ignores
+     * statusBarColor, so the WebView filled the whole screen and the header drew
+     * beneath the clock — the + in the top bar was physically unreachable.
+     *
+     * This is done here rather than with CSS env(safe-area-inset-*) on purpose.
+     * That depends on the WebView reporting insets into the page, which varies
+     * by Android and WebView version, and this app runs from API 26. Padding the
+     * root view is the same answer everywhere. The root already carries the
+     * page's own background colour, so the strip behind the status bar matches
+     * rather than showing through.
+     */
+    private void keepClearOfSystemBars(View root) {
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            int left;
+            int top;
+            int right;
+            int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.graphics.Insets bars = insets.getInsets(
+                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                left = bars.left;
+                top = bars.top;
+                right = bars.right;
+                bottom = bars.bottom;
+            } else {
+                left = insets.getSystemWindowInsetLeft();
+                top = insets.getSystemWindowInsetTop();
+                right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(left, top, right, bottom);
+            return insets;
+        });
+        root.requestApplyInsets();
     }
 
     /** Serves dist/ out of app assets for our own origin; anything else goes to the network. */
