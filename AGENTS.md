@@ -36,7 +36,8 @@ WeatherDeck is a personal, English-language Android weather dashboard. Keep it s
 - Run `npm run build` before Gradle so `dist/index.html` and hashed assets exist.
 - Keep location permission on demand: request it only after the user asks for GPS.
 - Only grant WebView geolocation to the private app origin.
-- Do not add Android notification permission unless native background notifications are actually implemented. Current Android wind alerts are in-app banners.
+- The notification permission is held for one purpose: PlanWatch, which posts only when a day the user marked changes materially. Ask for it when a day is marked, never at launch, and do not widen it to anything else.
+- Activity thresholds live in one place, `PROFILES[].limits`, as plain numbers. The Android side reads those numbers out of the marked plan; it must never grow its own copy of the rules. What it cannot apply (offshore wind, which needs the coastline probe) it simply omits, and it starts its comparison from its own first count so the gap never reads as a change.
 - Preserve the startup diagnostic view and interface polling in `MainActivity`.
 - The home-screen widget fetches its own small Open-Meteo payload because native code cannot read WebView forecast state. Keep its cached readings clearly labelled when stale and preserve dashes for missing values.
 - Mirror the selected WebView location to native `SharedPreferences` without exposing a JavaScript interface to embedded third-party frames.

@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
     private static final String APP_HOST = "appassets.androidplatform.net";
     private static final String APP_ORIGIN = "https://" + APP_HOST;
     private static final int LOCATION_REQUEST = 100;
+    private static final int NOTIFICATION_REQUEST = 101;
     private static final int READY_POLL_MS = 100;
     private static final int READY_ATTEMPTS = 40;
     private static final long WIDGET_REFRESH_AFTER_MS = 30L * 60L * 1000L;
@@ -189,6 +190,7 @@ public class MainActivity extends Activity {
                         webView.setVisibility(View.VISIBLE);
                         statusView.setVisibility(View.GONE);
                         syncWidgetLocation();
+                        syncPlan();
                     } else if (attempt < READY_ATTEMPTS) {
                         handler.postDelayed(() -> pollForInterface(attempt + 1), READY_POLL_MS);
                     } else {
@@ -228,6 +230,54 @@ public class MainActivity extends Activity {
     }
 
     /**
+     * The same trip out for the planned day: the marked date, its activity and
+     * that activity's thresholds as plain numbers, so the background check can
+     * apply them without a second copy of the rules living in Java.
+     */
+    private void syncPlan() {
+        if (webView == null) return;
+        webView.evaluateJavascript("localStorage.getItem('weatherdeck:plan')", value -> {
+            String stored = unwrap(value);
+            SharedPreferences prefs = WidgetData.prefs(this);
+            String previous = prefs.getString(PlanWatch.KEY_PLAN, "");
+            if (stored == null) {
+                if (!previous.isEmpty()) {
+                    prefs.edit().remove(PlanWatch.KEY_PLAN).apply();
+                    PlanWatch.reset(this);
+                    PlanWatch.cancel(this);
+                }
+                return;
+            }
+            // Re-armed on every visit, because alarms do not survive a reboot.
+            PlanWatch.schedule(this);
+            if (stored.equals(previous)) return;
+            prefs.edit().putString(PlanWatch.KEY_PLAN, stored).apply();
+            // A new plan starts its own comparison rather than inheriting the last one's.
+            PlanWatch.reset(this);
+            requestNotificationPermission();
+        });
+    }
+
+    /** evaluateJavascript hands back a JSON string literal, or the text "null". */
+    private static String unwrap(String value) {
+        if (value == null || "null".equals(value) || value.isEmpty()) return null;
+        try {
+            Object parsed = new org.json.JSONTokener(value).nextValue();
+            String text = parsed == null ? null : parsed.toString();
+            return text == null || text.isEmpty() || "null".equals(text) ? null : text;
+        } catch (org.json.JSONException malformed) {
+            return null;
+        }
+    }
+
+    /** Only asked for once a day has been marked, because only then is there anything to say. */
+    private void requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_REQUEST);
+    }
+
+    /**
      * The widget runs outside the WebView and cannot read its localStorage, so
      * the chosen location is copied out to SharedPreferences. Reading the value
      * back is a plain evaluateJavascript call — no JavaScript interface is
@@ -262,6 +312,7 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         syncWidgetLocation();
+        syncPlan();
         // Closing the app is the cheapest moment to top the widget up, but only
         // if what it holds has actually gone stale.
         if (WidgetData.olderThan(this, WIDGET_REFRESH_AFTER_MS)) WidgetProvider.requestRefresh(this);

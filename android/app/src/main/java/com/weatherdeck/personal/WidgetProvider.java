@@ -57,14 +57,19 @@ public class WidgetProvider extends AppWidgetProvider {
 
         AppWidgetManager manager = AppWidgetManager.getInstance(context);
         final int[] widgetIds = manager.getAppWidgetIds(new ComponentName(context, WidgetProvider.class));
-        if (widgetIds.length == 0) return;
+        // A marked day is watched whether or not a widget is on the home screen,
+        // so an empty widget list is not on its own a reason to do nothing.
+        if (widgetIds.length == 0 && !PlanWatch.isWatching(context)) return;
 
         final PendingResult pending = goAsync();
         final Context application = context.getApplicationContext();
         WORKERS.execute(() -> {
             try {
-                WidgetData.refresh(application);
-                renderAll(application, AppWidgetManager.getInstance(application), widgetIds);
+                if (widgetIds.length > 0) {
+                    WidgetData.refresh(application);
+                    renderAll(application, AppWidgetManager.getInstance(application), widgetIds);
+                }
+                PlanWatch.check(application);
             } catch (Throwable failure) {
                 // Nothing here may be allowed to fail silently: a widget that
                 // renders empty text looks broken and says nothing about why.

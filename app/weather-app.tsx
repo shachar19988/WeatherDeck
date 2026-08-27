@@ -254,6 +254,7 @@ function carryDaylight(base: Forecast | null): Forecast | null {
 
 const MATCH_KEY = 'profile_match';
 const PROFILE_KEY = 'weatherdeck:profile';
+const PLAN_KEY = 'weatherdeck:plan';
 const MIN_WINDOW_HOURS = 2;
 
 type Conditions = {
@@ -276,11 +277,40 @@ function clauses(...parts: (string | null)[]) {
 }
 
 type Spell = { start: number; end: number; hours: number; wind: number | null; wave: number | null; period: number | null; water: number | null };
+/**
+ * Thresholds as plain numbers rather than as code, so the same set can be handed
+ * to the Android side for the planned-day check without reimplementing any of
+ * the rules in Java. One definition, two readers.
+ */
+type Limits = {
+  waveMin?: number;
+  waveMax?: number;
+  windMin?: number;
+  windMax?: number;
+  gustMax?: number;
+  periodMin?: number;
+  waterMin?: number;
+  daylight?: boolean;
+  noOffshore?: boolean;
+};
+function suitsLimits(at: Conditions, limits: Limits) {
+  if (limits.daylight && !at.daylight) return false;
+  if (limits.noOffshore && at.offshore) return false;
+  if (limits.waveMin !== undefined && (at.wave === null || at.wave < limits.waveMin)) return false;
+  if (limits.waveMax !== undefined && (at.wave === null || at.wave >= limits.waveMax)) return false;
+  if (limits.windMin !== undefined && (at.wind === null || at.wind < limits.windMin)) return false;
+  if (limits.windMax !== undefined && (at.wind === null || at.wind > limits.windMax)) return false;
+  if (limits.gustMax !== undefined && (at.gust ?? 0) >= limits.gustMax) return false;
+  if (limits.periodMin !== undefined && (at.period ?? 0) < limits.periodMin) return false;
+  if (limits.waterMin !== undefined && (at.water ?? -99) < limits.waterMin) return false;
+  return true;
+}
+
 type Profile = {
   key: string;
   label: string;
   hint: string;
-  suits: (at: Conditions) => boolean;
+  limits: Limits;
   /** What makes this window worth taking, in the terms the sport is judged in. */
   why: (spell: Spell) => string;
   /**
@@ -311,7 +341,7 @@ const PROFILES: Profile[] = [
     key: 'sup',
     label: 'SUP',
     hint: 'under 10 kt · under 0.6 m',
-    suits: at => at.daylight && !at.offshore && at.wind !== null && at.wind < 10 && (at.wave ?? 0) < 0.6,
+    limits: { daylight: true, noOffshore: true, windMax: 10, waveMax: 0.6 },
     why: spell => clauses(spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`,
       spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
     pick: { of: spell => shown(spell.wind, 0), best: 'low', label: 'lightest wind' },
@@ -320,8 +350,7 @@ const PROFILES: Profile[] = [
     key: 'sup-surf',
     label: 'SUP surf',
     hint: '0.6-1.5 m · 7 s+ · under 12 kt',
-    suits: at => at.daylight && !at.offshore && at.wave !== null && at.wave >= 0.6 && at.wave <= 1.5
-      && (at.period ?? 0) >= 7 && (at.wind ?? 99) < 12,
+    limits: { daylight: true, noOffshore: true, waveMin: 0.6, waveMax: 1.51, periodMin: 7, windMax: 12 },
     why: spell => clauses(spell.wave === null ? null : `${spell.wave.toFixed(1)} m`,
       spell.period === null ? null : `${spell.period.toFixed(0)} s`,
       spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
@@ -343,7 +372,7 @@ const PROFILES: Profile[] = [
      * out for 8-12 on flat water found three hours in ten days and no run longer
      * than one, so the profile would simply never have fired.
      */
-    suits: at => at.wave !== null && at.wave < 0.7 && at.wind !== null && at.wind >= 6 && at.wind <= 14 && (at.gust ?? 0) < 24,
+    limits: { waveMax: 0.7, windMin: 6, windMax: 14, gustMax: 24 },
     why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
       spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
     pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'flattest sea' },
@@ -352,7 +381,7 @@ const PROFILES: Profile[] = [
     key: 'dive',
     label: 'Diving',
     hint: 'under 0.5 m · under 12 kt',
-    suits: at => at.daylight && at.wave !== null && at.wave < 0.5 && (at.wind ?? 99) < 12,
+    limits: { daylight: true, waveMax: 0.5, windMax: 12 },
     why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
       spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
     pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'calmest surface' },
@@ -361,8 +390,7 @@ const PROFILES: Profile[] = [
     key: 'swim',
     label: 'Swimming',
     hint: 'under 0.5 m · under 15 kt · 22°C+',
-    suits: at => at.daylight && !at.offshore && at.wave !== null && at.wave < 0.5
-      && (at.wind ?? 99) < 15 && (at.water ?? 0) >= 22,
+    limits: { daylight: true, noOffshore: true, waveMax: 0.5, windMax: 15, waterMin: 22 },
     why: spell => clauses(spell.water === null ? null : `${spell.water.toFixed(0)}°C water`,
       spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
     pick: { of: spell => shown(spell.water, 0), best: 'high', label: 'warmest water' },
@@ -383,8 +411,28 @@ function conditionsAt(data: Forecast | null, index: number): Conditions {
 function withProfile(base: Forecast | null, profile: Profile | null): Forecast | null {
   if (!base || !profile) return base;
   const hourly: Record<string, Series | string[]> = { ...base.hourly };
-  hourly[MATCH_KEY] = base.hourly.time.map((_, index) => (profile.suits(conditionsAt(base, index)) ? 1 : null));
+  hourly[MATCH_KEY] = base.hourly.time.map((_, index) =>
+    (suitsLimits(conditionsAt(base, index), profile.limits) ? 1 : null));
   return { ...base, hourly: hourly as Hourly };
+}
+
+/**
+ * A day marked in advance — a trip already in the diary — and what the forecast
+ * has done to it since. The point is not "what is Friday like" but "is Friday
+ * still on", which is a different question and only answerable against what it
+ * looked like when the plan was made.
+ */
+type Plan = { date: string; profile: string; setAt: number; hours: number; wind: number | null; wave: number | null };
+
+function planReading(data: Forecast | null, date: string, profile: Profile) {
+  const indexes = indexesForDate(data, date);
+  const fits = indexes.filter(index => suitsLimits(conditionsAt(data, index), profile.limits));
+  const window = fits.length ? fits : indexes;
+  const mean = (key: string) => {
+    const values = window.map(index => reading(data, key, index)).filter((v): v is number => v !== null);
+    return values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
+  };
+  return { hours: fits.length, wind: mean('wind_speed_10m'), wave: mean('wave_height') };
 }
 
 function meanOver(data: Forecast | null, key: string, from: number, to: number) {
@@ -731,6 +779,14 @@ export default function WeatherApp() {
   const [now, setNow] = useState(0);
   const [shore, setShore] = useState<ShoreMask | null>(null);
   const [profileKey, setProfileKey] = useState<string>(() => readStorage(PROFILE_KEY) || '');
+  const [plan, setPlan] = useState<Plan | null>(() => {
+    const raw = readStorage(PLAN_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as Plan;
+      return parsed && typeof parsed.date === 'string' ? parsed : null;
+    } catch { return null; }
+  });
 
   const searchInput = useRef<HTMLInputElement | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -918,6 +974,7 @@ export default function WeatherApp() {
   const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
 
   const profile = PROFILES.find(entry => entry.key === profileKey) ?? null;
+  const planProfile = plan ? PROFILES.find(entry => entry.key === plan.profile) ?? null : null;
   const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
     const withSea = withSeries(continuous, marine, MARINE_KEYS);
@@ -1036,6 +1093,23 @@ export default function WeatherApp() {
     setLocation(next); setSelectedDay(0); setSearchOpen(false); setSearch(''); setResults(NO_RESULTS); setGpsError('');
     writeStorage(LOCATION_KEY, JSON.stringify(next));
   }
+  /**
+   * Marking a day records what it looked like at the time. Without that there is
+   * nothing to compare against later, and "is it still on" has no answer.
+   */
+  function planDay() {
+    if (!profile || !selectedDate) return;
+    if (plan && plan.date === selectedDate && plan.profile === profile.key) {
+      setPlan(null);
+      writeStorage(PLAN_KEY, '');
+      return;
+    }
+    const now = planReading(tableData, selectedDate, profile);
+    const next: Plan = { date: selectedDate, profile: profile.key, setAt: Date.now(), ...now };
+    setPlan(next);
+    writeStorage(PLAN_KEY, JSON.stringify({ ...next, limits: profile.limits, label: profile.label }));
+  }
+
   function chooseProfile(key: string) {
     const next = profileKey === key ? '' : key;
     setProfileKey(next);
@@ -1153,6 +1227,38 @@ export default function WeatherApp() {
           })}
         </section>
 
+        {planProfile && plan && (() => {
+          const now = planReading(tableData, plan.date, planProfile);
+          const drop = plan.hours - now.hours;
+          const state = now.hours === 0 ? 'off' : drop >= 2 ? 'worse' : drop <= -2 ? 'better' : 'holding';
+          const moved = (was: number | null, is: number | null, digits: number, unit: string) =>
+            (was === null || is === null || Math.abs(was - is) < (digits ? 0.05 : 0.5)
+              ? null
+              : `${unit} ${was.toFixed(digits)} → ${is.toFixed(digits)}`);
+          const changes = clauses(
+            moved(plan.wave, now.wave, 1, 'sea'),
+            moved(plan.wind, now.wind, 0, 'wind'),
+          );
+          return (
+            <section className={`plan-card ${state}`}>
+              <p className="plan-head">
+                PLANNED · {planProfile.label.toUpperCase()} · {dayLabel(plan.date).dow} {dayLabel(plan.date).date}
+              </p>
+              <strong>
+                {state === 'off' ? 'No longer suits' : state === 'worse' ? 'Getting worse' : state === 'better' ? 'Improving' : 'Still on'}
+                {now.hours > 0 && <span> · {now.hours} h</span>}
+              </strong>
+              <small>
+                {clauses(
+                  now.wave === null ? null : `sea ${now.wave.toFixed(1)} m`,
+                  now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
+                ) || 'no readings yet'}
+              </small>
+              {changes && <small className="plan-change">since {dayLabel(new Date(plan.setAt).toISOString().slice(0, 10)).dow}: {changes}</small>}
+            </section>
+          );
+        })()}
+
         <section className="profile-strip" aria-label="Activity">
           {PROFILES.map(entry => (
             <button
@@ -1165,11 +1271,22 @@ export default function WeatherApp() {
               <b>{entry.label}</b><small>{entry.hint}</small>
             </button>
           ))}
+          {profile && selectedDate && (
+            <button
+              type="button"
+              className={`plan-button ${plan?.date === selectedDate && plan?.profile === profile.key ? 'on' : ''}`}
+              onClick={planDay}
+            >
+              <b>{plan?.date === selectedDate && plan?.profile === profile.key ? 'Planned' : 'Plan'}</b>
+              <small>{dayLabel(selectedDate).dow} {dayLabel(selectedDate).date}</small>
+            </button>
+          )}
         </section>
 
         {profile && (spells.length
           ? (
             <div className="window-list">
+              <p className="window-caption">Best {profile.label.toLowerCase()} windows</p>
               {spells.map((spell, position) => {
                 const date = tableData?.hourly?.time?.[spell.start]?.slice(0, 10);
                 const rival = spells[1 - position];
@@ -1179,15 +1296,13 @@ export default function WeatherApp() {
                   && (profile.pick.best === 'low' ? mine < theirs : mine > theirs);
                 return (
                   <button type="button" className="window-banner" key={spell.start} onClick={() => jumpToWindow(spell)}>
-                    <span>{position === 0 ? `LONGEST ${profile.label.toUpperCase()} WINDOW` : 'NEXT LONGEST'}</span>
                     <strong>
-                      {date ? `${dayLabel(date).dow} ${dayLabel(date).date} · ` : ''}
+                      {date ? `${dayLabel(date).dow} ` : ''}
                       {formatHour(tableData?.hourly?.time?.[spell.start])}–{formatHour(tableData?.hourly?.time?.[spell.end])}
                     </strong>
-                    <small>
-                      {spell.hours} h · {profile.why(spell)}
-                      {isPick && spells.length > 1 && <i>{profile.pick.label}</i>}
-                    </small>
+                    <b>{spell.hours} h</b>
+                    <small>{profile.why(spell)}</small>
+                    {isPick && spells.length > 1 && <i>{profile.pick.label}</i>}
                   </button>
                 );
               })}
@@ -1760,8 +1875,36 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   footnote?: { group: string; text: string };
   action?: ReactNode;
 }) {
+  const header = useRef<HTMLDivElement | null>(null);
+  const headerGrid = useRef<HTMLDivElement | null>(null);
   const scroller = useRef<HTMLDivElement | null>(null);
   const indexes = useMemo(() => columns.map(column => column.index), [columns]);
+
+  /**
+   * The dates and hours live in their own strip, scrolled sideways in step with
+   * the body below it.
+   *
+   * They used to share one box that scrolled both ways, which is what let the
+   * header stay put — and it also swallowed the page. A finger anywhere over the
+   * table drove the table's own scroll instead of the page, so you could not get
+   * back up, and reaching the table before it filled the screen left you reading
+   * a quarter-height grid. With the vertical scroll gone the page behaves
+   * normally and the strip pins to the top of the viewport instead.
+   */
+  /**
+   * Only the body scrolls; the header strip is shifted to match.
+   *
+   * Two scrollers syncing each other's scrollLeft is the obvious approach and a
+   * poor one: each write fires the other's scroll event, so it needs a guard
+   * flag, and a dropped frame leaves the two out of step. One scroller and a
+   * transform cannot desynchronise, and it never re-renders — the transform is
+   * written straight to the node.
+   */
+  const followHeader = (left: number) => {
+    const grid = headerGrid.current;
+    if (grid) grid.style.transform = `translateX(${-left}px)`;
+  };
+  const onBodyScroll = (event: React.UIEvent<HTMLDivElement>) => followHeader(event.currentTarget.scrollLeft);
 
   /**
    * Measured from the boxes themselves rather than offsetLeft: the day headers
@@ -1775,12 +1918,14 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
   useEffect(() => {
     const box = scroller.current;
     if (!box || !focusDate) return;
-    const target = box.querySelector<HTMLElement>(`[data-day-start="${focusDate}"]`);
+    const target = header.current?.querySelector<HTMLElement>(`[data-day-start="${focusDate}"]`);
     if (!target) return;
     const label = box.querySelector<HTMLElement>('.table-label');
     const gutter = label ? label.getBoundingClientRect().width : 0;
     const delta = target.getBoundingClientRect().left - box.getBoundingClientRect().left - gutter;
-    box.scrollLeft = Math.max(0, box.scrollLeft + delta);
+    const left = Math.max(0, box.scrollLeft + delta);
+    box.scrollLeft = left;
+    followHeader(left);
   }, [focusDate]);
 
   const night = new Set(indexes.filter(index => reading(data, 'is_day', index) === 0));
@@ -1813,8 +1958,9 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
         <div className="section-actions">{action}<span className="live-badge">{badge}</span></div>
       </div>
       {rows.length && columns.length ? (
-        <div className="weather-table" ref={scroller}>
-          <div className="table-grid" style={{ '--cols': columns.length } as CSSProperties}>
+        <>
+        <div className="table-head-strip" ref={header}>
+          <div className="table-grid" ref={headerGrid} style={{ '--cols': columns.length } as CSSProperties}>
             <div className="table-day table-label corner"><b>DATE</b></div>
             {spans.map(span => {
               const label = dayLabel(span.date);
@@ -1845,7 +1991,10 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
                 {night.has(column.index) && <em aria-label="after dark">☾</em>}
               </div>
             ))}
-
+          </div>
+        </div>
+        <div className="table-body" ref={scroller} onScroll={onBodyScroll}>
+          <div className="table-grid" style={{ '--cols': columns.length } as CSSProperties}>
             {rows.map((row, rowPosition) => (
               <Fragment key={row.key}>
                 {row.group !== rows[rowPosition - 1]?.group && <>
@@ -1873,6 +2022,7 @@ function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: 
             ))}
           </div>
         </div>
+        </>
       ) : (
         <p className="notice">{subject} publishes no data for this range.</p>
       )}
