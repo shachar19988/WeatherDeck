@@ -880,6 +880,25 @@ const STATE_WORDS: Record<string, string> = {
   off: 'No longer suits', worse: 'Getting worse', better: 'Improving', holding: 'Still on',
 };
 
+/**
+ * The verdict in words.
+ *
+ * A named hour that fails while the day around it is fine used to read "No
+ * longer suits · 7 h that day", which is a flat contradiction unless you
+ * already know the hour is the subject. It is also the most useful case there
+ * is — the trip is not off, it wants moving — so it says which of the two it
+ * means, and the hours become somewhere to move to rather than a rebuttal.
+ */
+function stateHeadline(session: Session, now: ReturnType<typeof sessionReading>, state: string) {
+  if (state === 'off' && now.suitsHour === false && now.hours > 0 && session.time) {
+    return { lead: `Not at ${session.time}`, aside: `${now.hours} h elsewhere that day` };
+  }
+  return {
+    lead: STATE_WORDS[state],
+    aside: now.hours > 0 ? `${now.hours} h that day` : null,
+  };
+}
+
 function meanOver(data: Forecast | null, key: string, from: number, to: number) {
   const values: number[] = [];
   for (let index = from; index <= to; index += 1) {
@@ -1808,8 +1827,10 @@ export default function WeatherApp() {
               {needsAttention.entry.time ? ` · ${needsAttention.entry.time}` : ''}
             </p>
             <strong>
-              {STATE_WORDS[needsAttention.state]}
-              {needsAttention.now.hours > 0 && <span> · {needsAttention.now.hours} h that day</span>}
+              {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).lead}
+              {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).aside && (
+                <span> · {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).aside}</span>
+              )}
             </strong>
             <small>
               {clauses(
@@ -2684,14 +2705,13 @@ function PlansView({ sessions, past, data, profiles, onAdd, onEdit, onRemove }: 
               {reach ? (
                 <>
                   <strong>
-                    {STATE_WORDS[state]}
-                    {now.hours > 0 && <span> · {now.hours} h that day</span>}
+                    {stateHeadline(session, now, state).lead}
+                    {stateHeadline(session, now, state).aside && (
+                      <span> · {stateHeadline(session, now, state).aside}</span>
+                    )}
                   </strong>
                   <small>
                     {clauses(
-                      session.time && now.suitsHour !== null
-                        ? `at ${session.time}: ${now.suitsHour ? 'suitable' : 'not suitable'}`
-                        : null,
                       now.wave === null ? null : `sea ${now.wave.toFixed(1)} m`,
                       now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
                     ) || 'no readings yet'}
