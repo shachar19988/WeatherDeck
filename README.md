@@ -55,10 +55,20 @@ else's sport and they should be easy to disagree with. Offshore wind rules out
 both board profiles whatever else is true, and both want daylight; a yacht is
 bound by neither.
 
-The flat-water ceiling is 0.6 m rather than the 0.4 m first tried. Measured
-against ten days of this coast, the sea never once dropped below 0.38 m and 0.4 m
-qualified nine daylight hours out of a hundred and thirty. A profile that can
-never light up is no more use than one that never goes out.
+Two of the thresholds were set by measurement rather than by guess, after the
+first attempt produced profiles that could never fire:
+
+- The flat-water ceiling is 0.6 m rather than 0.4 m. Over ten days of this coast
+  the sea never once dropped below 0.38 m, and 0.4 m qualified nine daylight
+  hours out of a hundred and thirty.
+- Sailing wants a sea under 0.7 m — guests aboard, and above that the boat stops
+  being fun for them long before it stops being safe — so its windows are ranked
+  on the flattest sea rather than the best breeze. The ideal breeze is 8-12 kt,
+  but the band is 6-14, because here the two wishes fight each other: the hours
+  with a sea under 0.7 m had a median wind of 4.4 kt and never once reached 10.
+  Holding out for 8-12 on flat water found three hours in ten days.
+
+A profile that can never light up is no more use than one that never goes out.
 
 The ensemble publishes no daylight flag, so beyond the operational range every
 hour read as unknown — and an unknown that counted as daylight quietly turned
@@ -109,13 +119,21 @@ operational range, the higher-resolution forecast takes over again.
 
 ### Reading it at a glance
 
-Wind is the one variable with a colour scale, green through amber to red. It is
-a severity scale rather than a plain magnitude one: on a board or at a helm, 8 kt
-and 28 kt are not two amounts of the same thing, they are two different days.
-Every band's ink was checked against its own fill rather than picked by eye —
-worst case 4.86:1, which matters on a phone in direct sun. Every cell still
-prints its number, so colour is never the only channel, and one scale doing one
-job beats colouring every row.
+One severity language, green through amber to red, shared by every reading that
+can make a day unusable. Each reading brings its own thresholds and the colours
+never change: wind is green to 10 kt and deepest red from 25 up, waves green to
+half a metre and deepest red from two. The row label says which reading it is;
+the colour says how much it matters, and it means the same thing wherever it
+appears.
+
+It is a severity scale rather than a plain magnitude one: on a board or at a
+helm, 8 kt and 28 kt are not two amounts of the same thing, they are two
+different days. Every band's ink was checked against its own fill rather than
+picked by eye — worst case 4.86:1, which matters on a phone in direct sun. Every
+cell still prints its number, so colour is never the only channel.
+
+Temperature keeps a separate cool-to-warm scale, because a warm day is not a
+severe one.
 
 ### The graph
 
@@ -154,12 +172,10 @@ to land. Three things fix that without hiding a single number:
 - **Every group restates the clock.** Scrolled down past a single header row, a
   column of numbers stops saying which hour it is, so each group header carries
   the hours again.
-- **Spectrum rows.** Wind, gusts, temperature, waves, swell and water temperature
-  fill their cells edge to edge, and each half fades towards the neighbouring
-  column's colour, so a row reads as one continuous gradient across the range
-  rather than a line of separate swatches. Wave height has its own blue ramp:
-  the wind ramp owns green to red, and a sea row beside a wind row must never
-  read as the same measurement.
+- **Spectrum rows.** Wind, gusts, waves, swell and water temperature fill their
+  cells edge to edge, and each half fades towards the neighbouring column's
+  colour, so a row reads as one continuous gradient across the range rather than
+  a line of separate swatches.
 - **A dry hour is an empty drop.** Eight cells reading "0.0" is filler the eye
   skips — which is why the rain row may as well not have been there on a dry day.
   A wet hour fills in, states the amount, and tints in proportion to it.

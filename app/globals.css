@@ -65,7 +65,9 @@
 .ramp-legend i{width:11px;height:9px;border-radius:0}
 .ramp-legend i:first-child{border-radius:3px 0 0 3px}
 .ramp-legend i:nth-last-child(2){border-radius:0 3px 3px 0}
-.ramp-legend b{margin-left:6px;font-size:9px;color:var(--muted)}
+.ramp-legend b{font-size:9px;color:var(--muted);font-weight:700}
+.ramp-legend b:first-child{margin-right:6px}
+.ramp-legend b:last-child{margin-left:6px}
 .graph-tooltip em{font-style:normal;color:var(--orange);margin-left:4px}
 .graph-frame{position:relative;margin-top:12px}
 .graph-frame svg{display:block;width:100%;height:auto;touch-action:pan-y}

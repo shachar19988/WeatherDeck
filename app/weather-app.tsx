@@ -58,26 +58,36 @@ const MARINE_KEYS = MARINE_VARS.split(',');
 const MODEL_ROW_PREFIX = 'model:';
 
 /**
- * Wind bands, green through yellow to red.
+ * One severity language, green through yellow to red, shared by every reading
+ * that can make a day unusable. Each reading brings its own thresholds; the
+ * colours never change.
  *
  * A severity scale rather than a plain magnitude one: on a board or at a helm,
  * 8 kt and 28 kt are not two amounts of the same thing, they are two different
- * days, and green-to-red is the convention that already means that.
+ * days, and green-to-red is the convention that already means that. The row
+ * label says which reading it is; the colour says how much it matters, and it
+ * means the same thing wherever it appears.
  *
  * Every band's ink was checked against its own fill rather than picked by eye —
  * worst case 4.86:1, which matters on a phone in direct sun as much as anywhere.
  * Each cell prints its number too, so colour is never the only channel.
  */
-
-const WIND_SCALE = [
-  { limit: 5, fill: '#0a6e3a', ink: '#ffffff' },
-  { limit: 10, fill: '#2f9412', ink: '#12100a' },
-  { limit: 15, fill: '#8ab800', ink: '#12100a' },
-  { limit: 20, fill: '#f0c000', ink: '#12100a' },
-  { limit: 25, fill: '#f28a00', ink: '#12100a' },
-  { limit: 30, fill: '#e2551c', ink: '#12100a' },
-  { limit: Infinity, fill: '#c81e1e', ink: '#ffffff' },
+const SEVERITY = [
+  { fill: '#0a6e3a', ink: '#ffffff' },
+  { fill: '#2f9412', ink: '#12100a' },
+  { fill: '#8ab800', ink: '#12100a' },
+  { fill: '#f0c000', ink: '#12100a' },
+  { fill: '#f28a00', ink: '#12100a' },
+  { fill: '#e2551c', ink: '#12100a' },
+  { fill: '#c81e1e', ink: '#ffffff' },
 ];
+function banded(limits: number[]) {
+  return limits.map((limit, index) => ({ limit, ...SEVERITY[index] }));
+}
+// Green to 10 kt, deepest red from 25 up.
+const WIND_SCALE = banded([10, 13, 16, 19, 22, 25, Infinity]);
+// Green to half a metre, deepest red from two up.
+const WAVE_SCALE = banded([0.5, 0.8, 1.1, 1.4, 1.7, 2, Infinity]);
 function windTone(value: number) {
   return WIND_SCALE.find(band => value < band.limit) ?? WIND_SCALE[WIND_SCALE.length - 1];
 }
@@ -100,20 +110,6 @@ function tempTone(value: number) {
   return TEMP_SCALE.find(band => value < band.limit) ?? TEMP_SCALE[TEMP_SCALE.length - 1];
 }
 
-/**
- * Wave height, calm to heavy. Blue throughout, because the wind ramp already
- * owns green to red and a sea row beside a wind row must never read as the same
- * measurement. Ink checked against each fill; worst case 5.24:1, lightness monotone.
- */
-const WAVE_SCALE = [
-  { limit: 0.3, fill: '#12384f', ink: '#dceaf5' },
-  { limit: 0.6, fill: '#1b5478', ink: '#eaf3fa' },
-  { limit: 1.0, fill: '#2172a4', ink: '#ffffff' },
-  { limit: 1.5, fill: '#3f9ac9', ink: '#0a1a24' },
-  { limit: 2.5, fill: '#6dbde0', ink: '#0a1a24' },
-  { limit: 4, fill: '#a5d8ee', ink: '#0a1a24' },
-  { limit: Infinity, fill: '#d6ecf8', ink: '#0a1a24' },
-];
 /**
  * A skipper thinks in force, not knots. Upper bounds of each force in knots,
  * from the Beaufort scale as defined for wind at 10 m — which is exactly the
@@ -334,11 +330,23 @@ const PROFILES: Profile[] = [
   {
     key: 'sail',
     label: 'Sailing',
-    hint: '8-22 kt · gusts under 30',
-    suits: at => at.wind !== null && at.wind >= 8 && at.wind <= 22 && (at.gust ?? 0) < 30 && (at.wave ?? 0) < 1.5,
-    why: spell => clauses(spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`,
-      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
-    pick: { of: spell => shown(spell.wind, 0), best: 'high', label: 'best breeze' },
+    hint: 'under 0.7 m · 6-14 kt',
+    /*
+     * The sea comes first here and the wind second: this is a day out with
+     * friends, some of whom have never sailed, and above about 0.7 m the boat
+     * stops being fun for them long before it stops being safe. So the window is
+     * picked on the flattest sea, not the best breeze.
+     *
+     * The ideal breeze is 8-12, but the band is 6-14 because on this coast the
+     * two wishes fight each other: measured over ten days, the hours with a sea
+     * under 0.7 m had a median wind of 4.4 kt and never once reached 10. Holding
+     * out for 8-12 on flat water found three hours in ten days and no run longer
+     * than one, so the profile would simply never have fired.
+     */
+    suits: at => at.wave !== null && at.wave < 0.7 && at.wind !== null && at.wind >= 6 && at.wind <= 14 && (at.gust ?? 0) < 24,
+    why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'flattest sea' },
   },
   {
     key: 'dive',
@@ -1619,9 +1627,11 @@ function ConditionsGraph({ data, indexes, nowIndex, threshold }: {
           )}
         </div>
         <div className="graph-legend">
+          {/* No unit: the same ramp now serves both panels on their own scales. */}
           <span className="ramp-legend">
-            {WIND_SCALE.map(band => <i key={band.limit} style={{ background: band.fill }} />)}
-            <b>kt</b>
+            <b>calm</b>
+            {SEVERITY.map(band => <i key={band.fill} style={{ background: band.fill }} />)}
+            <b>rough</b>
           </span>
         </div>
       </div>
