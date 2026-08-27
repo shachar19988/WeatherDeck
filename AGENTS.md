@@ -50,6 +50,8 @@ WeatherDeck is a personal, English-language Android weather dashboard. Keep it s
 - Disagreement thresholds (`SPLIT_WAVE_M`, `SPLIT_WIND_KT`) are set above the measured 90th percentile so a split reads as unusual. Re-measure before changing them; a warning that always fires is wallpaper.
 - Thresholds are user-editable: `PROFILE_DEFAULTS` holds the defaults, `weatherdeck:limits` holds the user's numbers, and `profilesWith()` merges them. Evaluate with the merged set, never with `PROFILE_DEFAULTS` directly. Only fields already present in an activity's defaults are offered for editing — a field to type into is an invitation to invent a rule that was never intended.
 - Editing a threshold re-stamps existing sessions and writes them back, for the same reason the load path does.
+- Day chips show wind as a range, never the peak alone. A peak reads as "the wind that day", so a morning of 4 kt looked like 9 and a correct rejection looked like a broken rule.
+- A session pinned to an hour reports that hour's readings and that hour's failing rule — never the day's mean. Two winds in one line read as a contradiction.
 - `bindingReason()` names the constraint that fails most often across a day, not the first. An hour can fail several at once, and the one you keep hitting is the one worth knowing.
 - The breeze note asks the coastline mask directly rather than reading `OFFSHORE_KEY`. That series encodes offshore as 1 and everything else as null, so onshore and unknown are indistinguishable — which is exactly the sea-breeze case.
 - The widget's subject is today. A planned session is a note underneath it, built from the count the background check already made; it fetches nothing of its own.

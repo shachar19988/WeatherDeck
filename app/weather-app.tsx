@@ -869,6 +869,34 @@ function breezeOn(data: Forecast | null, date: string, shore: ShoreMask | null) 
   };
 }
 
+/**
+ * Why one particular hour fails, in the same words a whole day uses.
+ *
+ * A session pinned to an hour that says only "no longer suits" invites the
+ * reading that the app has it wrong — especially when the day chip above shows
+ * a wind the hour does not have. Naming the constraint settles it either way.
+ */
+function hourReason(data: Forecast | null, date: string, time: string, limits: Limits) {
+  const at = indexAtHour(data, date, time);
+  if (at === null) return null;
+  const now = conditionsAt(data, at);
+  if (suitsLimits(now, limits)) return null;
+  if (limits.daylight && !now.daylight) return 'dark';
+  if (limits.noOffshore && now.offshore) return 'offshore wind';
+  if (limits.windMin !== undefined && (now.wind === null || now.wind < limits.windMin)) {
+    return now.wind === null ? 'no wind reading' : `under the ${limits.windMin} kt minimum`;
+  }
+  if (limits.windMax !== undefined && now.wind !== null && now.wind > limits.windMax) return `over the ${limits.windMax} kt maximum`;
+  if (limits.gustMax !== undefined && (now.gust ?? 0) >= limits.gustMax) return `gusts over ${limits.gustMax} kt`;
+  if (limits.waveMax !== undefined && now.wave !== null && now.wave >= limits.waveMax) return `sea over ${limits.waveMax} m`;
+  if (limits.waveMin !== undefined && (now.wave === null || now.wave < limits.waveMin)) return 'sea too flat';
+  if (limits.swellMin !== undefined && (now.swell === null || now.swell < limits.swellMin)) return 'not enough swell';
+  if (limits.swellPeriodMin !== undefined && (now.swellPeriod ?? 0) < limits.swellPeriodMin) return 'swell too short';
+  if (limits.windWaveMax !== undefined && (now.windWave ?? 0) >= limits.windWaveMax) return 'too much chop';
+  if (limits.waterMin !== undefined && (now.water ?? -99) < limits.waterMin) return 'water too cold';
+  return null;
+}
+
 /** off | worse | better | holding, from the day count and the named hour. */
 function sessionState(session: Session, now: ReturnType<typeof sessionReading>) {
   if (now.suitsHour === false || now.hours === 0) return 'off';
@@ -1550,6 +1578,10 @@ export default function WeatherApp() {
     return {
       low: temperatures.length ? Math.min(...temperatures) : null,
       high: temperatures.length ? Math.max(...temperatures) : null,
+      // A range, like the temperature above it. It used to show the day's peak
+      // alone, which reads as "the wind on Friday" — so a morning of 4 kt looked
+      // like 9, and an activity that wants 6 kt looked wrongly judged.
+      windLow: winds.length ? Math.min(...winds) : null,
       wind: winds.length ? Math.max(...winds) : null,
     };
   }), [days, current, extended]);
@@ -1735,7 +1767,6 @@ export default function WeatherApp() {
         </button>
         <div className="top-actions">
           <span className={`connection ${online ? 'online' : 'offline'}`}>{online ? 'LIVE' : 'OFFLINE'}</span>
-          <button type="button" className="icon-button add-session" onClick={openNewSession} aria-label="Plan a session">+</button>
           <button type="button" className={`icon-button ${busy ? 'spinning' : ''}`} onClick={() => refresh(true)} disabled={busy} aria-label="Refresh forecast">↻</button>
           <button type="button" className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Settings">≡</button>
         </div>
@@ -1807,7 +1838,11 @@ export default function WeatherApp() {
                 <b>{label.dow}</b>
                 <span>{label.date}</span>
                 <i>{stats.low === null || stats.high === null ? '—' : `${Math.round(stats.low)}–${Math.round(stats.high)}°`}</i>
-                <em>{stats.wind === null ? `D+${index}` : `${Math.round(stats.wind)} kt`}</em>
+                <em>{stats.wind === null
+                  ? `D+${index}`
+                  : stats.windLow === null || Math.round(stats.windLow) === Math.round(stats.wind)
+                    ? `${Math.round(stats.wind)} kt`
+                    : `${Math.round(stats.windLow)}–${Math.round(stats.wind)} kt`}</em>
                 {profile && matchesPerDay[index] > 0 && <u>{matchesPerDay[index]} h</u>}
               </button>
             );
@@ -1834,10 +1869,19 @@ export default function WeatherApp() {
             </strong>
             <small>
               {clauses(
-                needsAttention.now.wave === null ? null : `sea ${needsAttention.now.wave.toFixed(1)} m`,
-                needsAttention.now.wind === null ? null : `${needsAttention.now.wind.toFixed(0)} kt`,
+                needsAttention.entry.time ? `at ${needsAttention.entry.time}` : null,
+                (needsAttention.entry.time ? needsAttention.now.waveAtHour : needsAttention.now.wave) === null
+                  ? null
+                  : `sea ${(needsAttention.entry.time ? needsAttention.now.waveAtHour : needsAttention.now.wave)!.toFixed(1)} m`,
+                (needsAttention.entry.time ? needsAttention.now.windAtHour : needsAttention.now.wind) === null
+                  ? null
+                  : `${(needsAttention.entry.time ? needsAttention.now.windAtHour : needsAttention.now.wind)!.toFixed(0)} kt`,
                 needsAttention.state === 'off'
-                  ? bindingReason(tableData, needsAttention.entry.date, profiles.find(e => e.key === needsAttention.entry.profile)!)
+                  ? (needsAttention.entry.time
+                    ? hourReason(tableData, needsAttention.entry.date, needsAttention.entry.time,
+                      profiles.find(e => e.key === needsAttention.entry.profile)!.limits)
+                    : bindingReason(tableData, needsAttention.entry.date,
+                      profiles.find(e => e.key === needsAttention.entry.profile)!))
                   : null,
               ) || 'no readings yet'}
             </small>
@@ -2712,13 +2756,22 @@ function PlansView({ sessions, past, data, profiles, onAdd, onEdit, onRemove }: 
                   </strong>
                   <small>
                     {clauses(
-                      now.wave === null ? null : `sea ${now.wave.toFixed(1)} m`,
-                      now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
+                      session.time ? `at ${session.time}` : null,
+                      (session.time ? now.waveAtHour : now.wave) === null
+                        ? null : `sea ${(session.time ? now.waveAtHour : now.wave)!.toFixed(1)} m`,
+                      (session.time ? now.windAtHour : now.wind) === null
+                        ? null : `${(session.time ? now.windAtHour : now.wind)!.toFixed(0)} kt`,
                     ) || 'no readings yet'}
                   </small>
-                  {state === 'off' && bindingReason(data, session.date, profile) && (
-                    <small className="plan-why">held back by {bindingReason(data, session.date, profile)}</small>
-                  )}
+                  {state === 'off' && (() => {
+                    // The named hour's own reason first: when the day around it is
+                    // fine, the day-level answer would be blank and the card would
+                    // look simply wrong.
+                    const why = session.time
+                      ? hourReason(data, session.date, session.time, profile.limits)
+                      : bindingReason(data, session.date, profile);
+                    return why ? <small className="plan-why">{session.time ? why : `held back by ${why}`}</small> : null;
+                  })()}
                   {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind')) && (
                     <small className="plan-change">
                       since {dayLabel(localDateOf(session.setAt)).dow}:{' '}
