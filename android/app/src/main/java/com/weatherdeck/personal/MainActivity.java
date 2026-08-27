@@ -219,6 +219,11 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == NOTIFICATION_REQUEST) {
+            // Answered either way, the page should stop guessing.
+            reportNotificationState();
+            return;
+        }
         if (requestCode != LOCATION_REQUEST || pendingGeolocation == null) return;
         boolean granted = false;
         for (int result : grantResults) {
@@ -236,14 +241,15 @@ public class MainActivity extends Activity {
      */
     private void syncPlan() {
         if (webView == null) return;
-        webView.evaluateJavascript("localStorage.getItem('weatherdeck:plan')", value -> {
+        reportNotificationState();
+        webView.evaluateJavascript("localStorage.getItem('weatherdeck:events')", value -> {
             String stored = unwrap(value);
             SharedPreferences prefs = WidgetData.prefs(this);
             String previous = prefs.getString(PlanWatch.KEY_PLAN, "");
-            if (stored == null) {
+            if (stored == null || "[]".equals(stored.replace(" ", ""))) {
                 if (!previous.isEmpty()) {
                     prefs.edit().remove(PlanWatch.KEY_PLAN).apply();
-                    PlanWatch.reset(this);
+                    PlanWatch.reset(this, java.util.Collections.<String>emptySet());
                     PlanWatch.cancel(this);
                 }
                 return;
@@ -252,10 +258,41 @@ public class MainActivity extends Activity {
             PlanWatch.schedule(this);
             if (stored.equals(previous)) return;
             prefs.edit().putString(PlanWatch.KEY_PLAN, stored).apply();
-            // A new plan starts its own comparison rather than inheriting the last one's.
-            PlanWatch.reset(this);
+            // Baselines for sessions that are gone, or were edited, go with them.
+            PlanWatch.reset(this, idsIn(stored));
             requestNotificationPermission();
         });
+    }
+
+    private static java.util.Set<String> idsIn(String sessions) {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        try {
+            org.json.JSONArray parsed = new org.json.JSONArray(sessions);
+            for (int i = 0; i < parsed.length(); i++) {
+                org.json.JSONObject entry = parsed.optJSONObject(i);
+                if (entry != null) ids.add(entry.optString("id", entry.optString("date", "")));
+            }
+        } catch (org.json.JSONException malformed) {
+            // Keeping nothing is the safe direction here: a session quietly
+            // starting its comparison over beats one inheriting a stale baseline.
+        }
+        return ids;
+    }
+
+    /**
+     * Tells the page whether alerts can actually be posted. The page cannot ask
+     * Android itself — no JavaScript interface is installed, deliberately — so
+     * this is the one safe direction: Java writes, the page reads. Without it
+     * the planner would promise notifications that were refused and never come.
+     */
+    private void reportNotificationState() {
+        if (webView == null) return;
+        boolean granted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        String state = granted ? "granted" : "denied";
+        WidgetData.prefs(this).edit().putString(PlanWatch.KEY_NOTIFY_STATE, state).apply();
+        webView.evaluateJavascript(
+                "try{localStorage.setItem('weatherdeck:notify','" + state + "')}catch(e){}", null);
     }
 
     /** evaluateJavascript hands back a JSON string literal, or the text "null". */

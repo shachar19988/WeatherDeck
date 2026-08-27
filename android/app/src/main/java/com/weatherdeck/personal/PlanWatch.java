@@ -46,8 +46,10 @@ final class PlanWatch {
     /** Kept in step with WAVE_MODELS in the interface; see the note there. */
     private static final String WAVE_MODELS = "ecmwf_wam025,gwam,ewam,ncep_gfswave016,meteofrance_wave";
 
-    static final String KEY_PLAN = "plan";
-    private static final String KEY_LAST_HOURS = "planLastHours";
+    static final String KEY_PLAN = "events";
+    /** Per session, so one trip going quiet cannot mask another one turning. */
+    private static final String LAST_HOURS_PREFIX = "lastHours:";
+    static final String KEY_NOTIFY_STATE = "notifyState";
 
     private PlanWatch() {
     }
@@ -59,35 +61,48 @@ final class PlanWatch {
         if (raw == null || raw.isEmpty()) return;
 
         try {
-            JSONObject plan = new JSONObject(raw);
-            String date = plan.optString("date", "");
-            if (date.isEmpty()) return;
-
+            JSONArray sessions = new JSONArray(raw);
             double latitude = readDouble(prefs, WidgetData.KEY_LAT, 32.794);
             double longitude = readDouble(prefs, WidgetData.KEY_LON, 34.9896);
-            JSONObject limits = plan.optJSONObject("limits");
-            if (limits == null) return;
+            String today = today();
+            for (int i = 0; i < sessions.length(); i++) {
+                JSONObject session = sessions.optJSONObject(i);
+                if (session != null) checkOne(context, prefs, session, latitude, longitude, today);
+            }
+        } catch (JSONException malformed) {
+            Log.w(TAG, "Session list unreadable", malformed);
+        }
+    }
 
-            if (date.compareTo(today()) < 0) return; // The day has been and gone.
+    private static void checkOne(Context context, SharedPreferences prefs, JSONObject session,
+            double latitude, double longitude, String today) {
+        String date = session.optString("date", "");
+        String id = session.optString("id", date);
+        JSONObject limits = session.optJSONObject("limits");
+        if (date.isEmpty() || id.isEmpty() || limits == null) return;
+        if (date.compareTo(today) < 0) return; // The day has been and gone.
 
-            int hours = suitableHours(latitude, longitude, date, limits);
-            if (!prefs.contains(KEY_LAST_HOURS)) {
-                // First look at this plan. The count the interface showed also
+        String key = LAST_HOURS_PREFIX + id;
+        try {
+            String time = session.isNull("time") ? null : session.optString("time", null);
+            int hours = suitableHours(latitude, longitude, date, limits, time);
+            if (!prefs.contains(key)) {
+                // First look at this session. The count the interface showed also
                 // applies the offshore rule, which this cannot, so starting from
                 // that number would report a change that never happened. Adopt
                 // this count as the baseline instead and stay quiet.
-                prefs.edit().putInt(KEY_LAST_HOURS, hours).apply();
+                prefs.edit().putInt(key, hours).apply();
                 return;
             }
 
-            int lastTold = prefs.getInt(KEY_LAST_HOURS, hours);
+            int lastTold = prefs.getInt(key, hours);
             boolean gone = hours == 0 && lastTold > 0;
             if (!gone && Math.abs(hours - lastTold) < MEANINGFUL_CHANGE) return;
 
-            prefs.edit().putInt(KEY_LAST_HOURS, hours).apply();
-            notifyChange(context, plan.optString("label", "Plan"), date, hours, lastTold);
+            prefs.edit().putInt(key, hours).apply();
+            notifyChange(context, session.optString("label", "Session"), date, time, id, hours, lastTold);
         } catch (JSONException | IOException failure) {
-            Log.w(TAG, "Plan check failed", failure);
+            Log.w(TAG, "Session check failed", failure);
         }
     }
 
@@ -123,9 +138,19 @@ final class PlanWatch {
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
 
-    /** Clears the running comparison so a newly marked day starts from its own baseline. */
-    static void reset(Context context) {
-        WidgetData.prefs(context).edit().remove(KEY_LAST_HOURS).apply();
+    /**
+     * Drops the running comparisons for sessions no longer in the list, and for
+     * any whose plan was edited. Left alone, a deleted trip's baseline would sit
+     * in preferences for good and be inherited by whatever reused its id.
+     */
+    static void reset(Context context, java.util.Set<String> keepIds) {
+        SharedPreferences prefs = WidgetData.prefs(context);
+        SharedPreferences.Editor editor = prefs.edit();
+        for (String name : prefs.getAll().keySet()) {
+            if (!name.startsWith(LAST_HOURS_PREFIX)) continue;
+            if (!keepIds.contains(name.substring(LAST_HOURS_PREFIX.length()))) editor.remove(name);
+        }
+        editor.apply();
     }
 
     /** "Fri Sep 4", to match the day the app itself shows. */
@@ -153,7 +178,12 @@ final class PlanWatch {
         }
     }
 
-    private static int suitableHours(double latitude, double longitude, String date, JSONObject limits)
+    /**
+     * Hours of the day that pass the limits — or, when an hour was named, 1 or 0
+     * for that hour alone, since seven good hours are no comfort if none of them
+     * is the one you are on the water.
+     */
+    private static int suitableHours(double latitude, double longitude, String date, JSONObject limits, String time)
             throws IOException, JSONException {
         JSONObject air = WidgetData.fetch("https://api.open-meteo.com/v1/forecast"
                 + "?latitude=" + latitude + "&longitude=" + longitude
@@ -190,13 +220,29 @@ final class PlanWatch {
         JSONArray wind = airHourly.optJSONArray("wind_speed_10m");
         JSONArray gust = airHourly.optJSONArray("wind_gusts_10m");
         JSONArray day = airHourly.optJSONArray("is_day");
+        JSONArray stamps = airHourly.optJSONArray("time");
         int length = wind == null ? 0 : wind.length();
+
+        int only = time == null ? -1 : indexOfHour(stamps, date, time);
+        if (time != null && only < 0) return 0;
+
         int count = 0;
         for (int i = 0; i < length; i++) {
+            if (only >= 0 && i != only) continue;
             if (fits(limits, at(wind, i), at(gust, i), at(wave, i), at(day, i),
                     at(swell, i), at(swellPeriod, i), at(windWave, i))) count++;
         }
         return count;
+    }
+
+    /** Open-Meteo stamps are "2026-09-04T09:00" in the location's own clock. */
+    private static int indexOfHour(JSONArray stamps, String date, String time) {
+        if (stamps == null || time.length() < 2) return -1;
+        String target = date + "T" + time.substring(0, 2) + ":00";
+        for (int i = 0; i < stamps.length(); i++) {
+            if (target.equals(stamps.optString(i, null))) return i;
+        }
+        return -1;
     }
 
     /**
@@ -257,7 +303,8 @@ final class PlanWatch {
         return true;
     }
 
-    private static void notifyChange(Context context, String label, String date, int hours, int baseline) {
+    private static void notifyChange(Context context, String label, String date, String time,
+            String id, int hours, int baseline) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         if (manager == null) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -270,11 +317,17 @@ final class PlanWatch {
 
         // Which way it moved, said outright. A lock screen is read in a glance
         // and "5 h, was 7" makes you do the subtraction yourself.
-        String when = label + " " + readableDate(date);
-        String headline = hours == 0
-                ? when + " no longer suits"
-                : (hours < baseline ? when + " is getting worse" : when + " is improving")
+        String when = label + " " + readableDate(date) + (time == null ? "" : " at " + time);
+        String headline;
+        if (hours == 0) {
+            headline = when + (time == null ? " no longer suits" : " no longer suits that hour");
+        } else if (time != null) {
+            // With an hour named the count is 1 or 0, so a rise means it is back on.
+            headline = when + " suits again";
+        } else {
+            headline = (hours < baseline ? when + " is getting worse" : when + " is improving")
                     + " — " + hours + " h, was " + baseline;
+        }
         Intent open = new Intent(context, MainActivity.class)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
 
@@ -283,9 +336,11 @@ final class PlanWatch {
                 .setContentTitle(headline)
                 .setContentText("Open WeatherDeck for the full picture.")
                 .setAutoCancel(true)
-                .setContentIntent(PendingIntent.getActivity(context, 1, open,
+                .setContentIntent(PendingIntent.getActivity(context, Math.abs(id.hashCode() % 1000), open,
                         PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
                 .build();
-        manager.notify(NOTIFICATION_ID, notification);
+        // One notification per session, so a second trip turning cannot silently
+        // replace the first one's alert.
+        manager.notify(NOTIFICATION_ID + Math.abs(id.hashCode() % 1000), notification);
     }
 }

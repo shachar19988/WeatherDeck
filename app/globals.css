@@ -157,3 +157,42 @@
 /* Model disagreement on a planned day. Amber rather than red: it is a reason
    to wait before deciding, not a reason to cancel. */
 .plan-split{display:block;margin-top:5px;font-size:8px;color:#e8c06a;line-height:1.45}
+
+/* ---------- planned sessions ---------- */
+
+/* The + carries the accent because it is the only control here that creates
+   something; everything else in the bar acts on what is already on screen. */
+.icon-button.add-session{background:var(--accent);border-color:var(--accent);color:#062018;font-size:26px;font-weight:700}
+
+/* The forecast page's card is a button now — it opens the tab that owns it. */
+.plan-card{display:block;width:100%;text-align:left;font:inherit;cursor:pointer}
+.tab-count{display:inline-grid;place-items:center;min-width:15px;height:15px;margin-left:4px;padding:0 4px;border-radius:8px;background:var(--accent);color:#062018;font-style:normal;font-size:8px;font-weight:900;vertical-align:middle}
+
+.field{display:block;margin:14px 0 0}
+.field > span{display:block;font-size:9px;font-weight:900;letter-spacing:.13em;text-transform:uppercase;color:var(--accent);margin-bottom:7px}
+.field > span em{font-style:normal;font-weight:600;letter-spacing:.04em;text-transform:none;color:var(--muted);margin-left:5px}
+.field input[type=date],.field input[type=time]{width:100%;border:1px solid var(--line);border-radius:12px;background:#0b1f28;color:var(--ink);font:inherit;font-size:14px;padding:12px 13px}
+/* Without this the native pickers render their glyphs near-black on dark. */
+.field input::-webkit-calendar-picker-indicator{filter:invert(1) opacity(.6)}
+.field-note{margin:7px 0 0;font-size:9px;line-height:1.5;color:var(--muted)}
+.field-note.preview{color:var(--accent);opacity:.9}
+
+.plan-profiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:7px}
+.plan-profiles button{border:1px solid var(--line);border-radius:12px;background:#0b1f28;color:#b7c7cd;text-align:left;padding:10px 11px}
+.plan-profiles button b{display:block;font-size:12px}
+.plan-profiles button small{display:block;font-size:8px;color:var(--muted);margin-top:3px;line-height:1.4}
+.plan-profiles button.on{border-color:var(--accent);background:#12332f;color:var(--accent)}
+.plan-profiles button.on small{color:inherit;opacity:.8}
+
+.session-row{display:flex;align-items:flex-start;gap:9px;margin:0 0 9px;border:1px solid var(--line);border-radius:16px;background:#0e242d;padding:13px 15px}
+.session-row.holding,.session-row.better{border-color:#2f6a5c;background:#0f2b2a}
+.session-row.worse{border-color:#6d4a2c;background:#241d10}
+.session-row.off{border-color:#7d3b34;background:#2a1614}
+.session-row.far,.session-row.past{opacity:.62}
+.session-body{flex:1;min-width:0;border:0;background:none;color:inherit;font:inherit;text-align:left;padding:0;cursor:pointer}
+.session-body strong{display:block;font-size:14px;margin-top:5px}
+.session-body strong span{font-weight:600;color:var(--muted)}
+.session-body small{display:block;font-size:9px;color:var(--muted);margin-top:3px;line-height:1.5}
+.session-row .remove-button{width:32px;height:32px;min-width:32px;font-size:18px}
+.past-heading{margin:20px 0 9px}
+.notice.quiet{border-color:#2f5a4e;color:#8fb3aa;font-size:10px}

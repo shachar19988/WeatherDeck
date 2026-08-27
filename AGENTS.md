@@ -36,7 +36,10 @@ WeatherDeck is a personal, English-language Android weather dashboard. Keep it s
 - Run `npm run build` before Gradle so `dist/index.html` and hashed assets exist.
 - Keep location permission on demand: request it only after the user asks for GPS.
 - Only grant WebView geolocation to the private app origin.
-- The notification permission is held for one purpose: PlanWatch, which posts only when a day the user marked changes materially. Ask for it when a day is marked, never at launch, and do not widen it to anything else.
+- The notification permission is held for one purpose: PlanWatch, which posts only when a planned session changes materially. Ask for it when a session is saved, never at launch, and do not widen it to anything else.
+- Sessions live in `weatherdeck:events` as a list, each carrying its own `limits` and `label` so Android needs no rules of its own. Baselines are keyed per session id and cleared when a session is deleted or edited — a stale baseline reports a change that never happened.
+- A session may name an hour. When it does, the verdict is about that hour alone, on both sides. Seven good hours are no comfort if none of them is the one you are on the water.
+- Android writes `weatherdeck:notify` into localStorage so the planner can say whether alerts actually work. That direction only — Java writes, the page reads. Do not install a JavaScript interface to make it two-way.
 - Waves come from `WAVE_MODELS`, not from the six weather models. Do not add `best_match` — measured at Haifa, Biarritz and Bali it is byte-identical to `meteofrance_wave` and would weight it twice. Do not add `ncep_gfswave025`: at Biarritz it sits 1.2 m from every other model while `ncep_gfswave016` agrees with them, which is a bad grid point, not a real disagreement. Regional models are absent outside their domain by design; the per-hour count carries that.
 - Surfing is judged on `swell_wave_height` and `swell_wave_period` with `windWaveMax` holding the chop down, never on total wave height. Flat-water and boat profiles use the total, which is the right question for them.
 - Disagreement thresholds (`SPLIT_WAVE_M`, `SPLIT_WIND_KT`) are set above the measured 90th percentile so a split reads as unusual. Re-measure before changing them; a warning that always fires is wallpaper.

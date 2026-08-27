@@ -7,7 +7,7 @@ type Hourly = { time: string[] } & Record<string, Series | string[]>;
 type Forecast = { hourly: Hourly; hourly_units?: Record<string, string>; utc_offset_seconds?: number };
 type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS' | 'UKMO' | 'GEM';
 type ActiveModel = ModelKey | 'MEAN';
-type ViewKey = 'Forecast' | 'Map' | 'Saved';
+type ViewKey = 'Forecast' | 'Plans' | 'Map' | 'Saved';
 type DataSource = 'live' | 'cache' | 'none';
 type CachePayload = { forecasts: Partial<Record<ModelKey, Forecast>>; marine: Forecast | null; extended: Forecast | null; savedAt: number };
 
@@ -305,7 +305,16 @@ function carryDaylight(base: Forecast | null): Forecast | null {
 
 const MATCH_KEY = 'profile_match';
 const PROFILE_KEY = 'weatherdeck:profile';
-const PLAN_KEY = 'weatherdeck:plan';
+const SESSIONS_KEY = 'weatherdeck:events';
+/**
+ * Written by the Android side after it asks for the notification permission.
+ * The page cannot read an Android permission itself — no JavaScript interface
+ * is installed, deliberately — so this is the one direction that is safe:
+ * Java tells the page, the page never calls Java.
+ */
+const NOTIFY_STATE_KEY = 'weatherdeck:notify';
+// The single planned day this replaced. Read once, then left alone.
+const LEGACY_PLAN_KEY = 'weatherdeck:plan';
 const MIN_WINDOW_HOURS = 2;
 
 type Conditions = {
@@ -506,7 +515,65 @@ function withProfile(base: Forecast | null, profile: Profile | null): Forecast |
  * still on", which is a different question and only answerable against what it
  * looked like when the plan was made.
  */
-type Plan = { date: string; profile: string; setAt: number; hours: number; wind: number | null; wave: number | null };
+type Session = {
+  id: string;
+  date: string;
+  /** "HH:MM" when an hour was named, null for "some time that day". */
+  time: string | null;
+  profile: string;
+  /** Carried so the Android watcher needs no table of its own. */
+  label: string;
+  limits: Limits;
+  setAt: number;
+  /** The forecast as it stood when this was written down. */
+  hours: number;
+  wind: number | null;
+  wave: number | null;
+};
+
+/** Open-Meteo timestamps are "2026-09-04T09:00" in the location's own clock. */
+function indexAtHour(data: Forecast | null, date: string, time: string | null) {
+  if (!time) return null;
+  const at = (data?.hourly?.time || []).indexOf(`${date}T${time.slice(0, 2)}:00`);
+  return at < 0 ? null : at;
+}
+
+function readSessions(): Session[] {
+  const raw = readStorage(SESSIONS_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Session[];
+      if (Array.isArray(parsed)) return parsed.filter(entry => entry && typeof entry.date === 'string');
+    } catch { /* unreadable; fall through to the legacy single plan */ }
+  }
+  // One planned day used to live under its own key. Carry it across rather
+  // than silently dropping a trip somebody had already written down.
+  const legacy = readStorage(LEGACY_PLAN_KEY);
+  if (!legacy) return [];
+  try {
+    const old = JSON.parse(legacy) as Partial<Session>;
+    if (!old || typeof old.date !== 'string') return [];
+    const profile = PROFILES.find(entry => entry.key === old.profile);
+    if (!profile) return [];
+    const carried: Session[] = [{
+      id: `legacy-${old.date}`,
+      date: old.date,
+      time: null,
+      profile: profile.key,
+      label: profile.label,
+      limits: profile.limits,
+      setAt: old.setAt ?? Date.now(),
+      hours: old.hours ?? 0,
+      wind: old.wind ?? null,
+      wave: old.wave ?? null,
+    }];
+    // Written out straight away rather than left in memory: the Android watcher
+    // reads storage, so a migration that never lands there is a trip that
+    // silently stops being watched.
+    writeStorage(SESSIONS_KEY, JSON.stringify(carried));
+    return carried;
+  } catch { return []; }
+}
 
 /**
  * How far apart the models were across a day, which is a different question
@@ -528,16 +595,62 @@ function agreementOn(data: Forecast | null, date: string) {
   };
 }
 
-function planReading(data: Forecast | null, date: string, profile: Profile) {
-  const indexes = indexesForDate(data, date);
+/**
+ * What a booked session looks like right now.
+ *
+ * When an hour was named the verdict is about that hour, because "seven good
+ * hours on Friday" is no comfort if none of them is the one you are on the
+ * water. The day's count stays alongside it as context — it is what tells you
+ * whether moving the trip a few hours would rescue it.
+ */
+function sessionReading(data: Forecast | null, session: { date: string; time: string | null }, profile: Profile) {
+  const indexes = indexesForDate(data, session.date);
   const fits = indexes.filter(index => suitsLimits(conditionsAt(data, index), profile.limits));
   const window = fits.length ? fits : indexes;
   const mean = (key: string) => {
     const values = window.map(index => reading(data, key, index)).filter((v): v is number => v !== null);
     return values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
   };
-  return { hours: fits.length, wind: mean('wind_speed_10m'), wave: mean('wave_height') };
+  const at = indexAtHour(data, session.date, session.time);
+  return {
+    hours: fits.length,
+    wind: mean('wind_speed_10m'),
+    wave: mean('wave_height'),
+    // Null when no hour was named, or when the forecast does not reach it yet.
+    suitsHour: at === null ? null : suitsLimits(conditionsAt(data, at), profile.limits),
+    windAtHour: at === null ? null : reading(data, 'wind_speed_10m', at),
+    waveAtHour: at === null ? null : reading(data, 'wave_height', at),
+  };
 }
+
+/**
+ * The soonest session that has turned for the worse.
+ *
+ * Only one earns space on the forecast page; the rest live in their own tab. A
+ * card per trip on the front page would be exactly the clutter the tab exists
+ * to avoid.
+ */
+function firstTurned(sessions: Session[], data: Forecast | null) {
+  for (const entry of sessions) {
+    const chosen = PROFILES.find(item => item.key === entry.profile);
+    if (!chosen) continue;
+    const now = sessionReading(data, entry, chosen);
+    const state = sessionState(entry, now);
+    if (state === 'off' || state === 'worse') return { entry, now, state };
+  }
+  return null;
+}
+
+/** off | worse | better | holding, from the day count and the named hour. */
+function sessionState(session: Session, now: ReturnType<typeof sessionReading>) {
+  if (now.suitsHour === false || now.hours === 0) return 'off';
+  const drop = session.hours - now.hours;
+  return drop >= 2 ? 'worse' : drop <= -2 ? 'better' : 'holding';
+}
+
+const STATE_WORDS: Record<string, string> = {
+  off: 'No longer suits', worse: 'Getting worse', better: 'Improving', holding: 'Still on',
+};
 
 function meanOver(data: Forecast | null, key: string, from: number, to: number) {
   const values: number[] = [];
@@ -928,14 +1041,9 @@ export default function WeatherApp() {
   const [now, setNow] = useState(0);
   const [shore, setShore] = useState<ShoreMask | null>(null);
   const [profileKey, setProfileKey] = useState<string>(() => readStorage(PROFILE_KEY) || '');
-  const [plan, setPlan] = useState<Plan | null>(() => {
-    const raw = readStorage(PLAN_KEY);
-    if (!raw) return null;
-    try {
-      const parsed = JSON.parse(raw) as Plan;
-      return parsed && typeof parsed.date === 'string' ? parsed : null;
-    } catch { return null; }
-  });
+  const [sessions, setSessions] = useState<Session[]>(readSessions);
+  const [planOpen, setPlanOpen] = useState(false);
+  const [draft, setDraft] = useState({ id: '', date: '', time: '', profile: '' });
 
   const searchInput = useRef<HTMLInputElement | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -1075,15 +1183,15 @@ export default function WeatherApp() {
   }, [query]);
 
   useEffect(() => {
-    if (!searchOpen && !settingsOpen) return undefined;
+    if (!searchOpen && !settingsOpen && !planOpen) return undefined;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setSearchOpen(false); setSettingsOpen(false); }
+      if (event.key === 'Escape') { setSearchOpen(false); setSettingsOpen(false); setPlanOpen(false); }
     };
     window.addEventListener('keydown', onKey);
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = previous; };
-  }, [searchOpen, settingsOpen]);
+  }, [searchOpen, settingsOpen, planOpen]);
 
   const consensus = useMemo(() => buildConsensus(forecasts), [forecasts]);
   const current = activeModel === 'MEAN' ? consensus : (forecasts[activeModel] || null);
@@ -1132,7 +1240,6 @@ export default function WeatherApp() {
   const leadNote = sourceWorthSaying ? `${confidenceAt(dayIndex).label} · ${sourceDetail}` : confidenceAt(dayIndex).label;
 
   const profile = PROFILES.find(entry => entry.key === profileKey) ?? null;
-  const planProfile = plan ? PROFILES.find(entry => entry.key === plan.profile) ?? null : null;
   const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
     const withSea = withSeries(withSeries(continuous, marine, MARINE_KEYS), consensus ?? undefined, WIND_AGREEMENT_KEYS);
@@ -1141,6 +1248,14 @@ export default function WeatherApp() {
     const flagged = withProfile(withOffshore(carryDaylight(lit), shore), profile);
     return compareModels ? withModelWinds(flagged, forecasts) : flagged;
   }, [continuous, marine, consensus, current, forecasts, compareModels, shore, profile]);
+
+  // Days already gone stop being watched, but are not deleted from under you.
+  const todayHere = localDateAt(tableData) || days[0] || '';
+  const upcoming = useMemo(
+    () => sessions.filter(entry => !todayHere || entry.date >= todayHere),
+    [sessions, todayHere],
+  );
+  const needsAttention = useMemo(() => firstTurned(upcoming, tableData), [upcoming, tableData]);
 
   // Every three-hourly slot of every day, in order — the table is one scroll
   // through the whole range rather than a view onto a chosen day.
@@ -1245,21 +1360,50 @@ export default function WeatherApp() {
     setLocation(next); setSelectedDay(0); setSearchOpen(false); setSearch(''); setResults(NO_RESULTS); setGpsError('');
     writeStorage(LOCATION_KEY, JSON.stringify(next));
   }
+  function openNewSession() {
+    setDraft({ id: '', date: selectedDate || days[0] || '', time: '', profile: profileKey || PROFILES[0].key });
+    setPlanOpen(true);
+  }
+
+  function editSession(session: Session) {
+    setDraft({ id: session.id, date: session.date, time: session.time || '', profile: session.profile });
+    setPlanOpen(true);
+  }
+
+  function keepSessions(next: Session[]) {
+    const ordered = next.slice().sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
+    setSessions(ordered);
+    writeStorage(SESSIONS_KEY, JSON.stringify(ordered));
+  }
+
   /**
-   * Marking a day records what it looked like at the time. Without that there is
-   * nothing to compare against later, and "is it still on" has no answer.
+   * Saving records the forecast as it stands, which is what every later "still
+   * on?" is measured against. Editing an existing one re-records it on purpose:
+   * the plan changed, so the old comparison no longer describes anything.
    */
-  function planDay() {
-    if (!profile || !selectedDate) return;
-    if (plan && plan.date === selectedDate && plan.profile === profile.key) {
-      setPlan(null);
-      writeStorage(PLAN_KEY, '');
-      return;
-    }
-    const now = planReading(tableData, selectedDate, profile);
-    const next: Plan = { date: selectedDate, profile: profile.key, setAt: Date.now(), ...now };
-    setPlan(next);
-    writeStorage(PLAN_KEY, JSON.stringify({ ...next, limits: profile.limits, label: profile.label }));
+  function saveDraft() {
+    const chosen = PROFILES.find(entry => entry.key === draft.profile);
+    if (!chosen || !draft.date) return;
+    const time = draft.time || null;
+    const now = sessionReading(tableData, { date: draft.date, time }, chosen);
+    const entry: Session = {
+      id: draft.id || `${draft.date}-${chosen.key}-${Date.now().toString(36)}`,
+      date: draft.date,
+      time,
+      profile: chosen.key,
+      label: chosen.label,
+      limits: chosen.limits,
+      setAt: Date.now(),
+      hours: now.hours,
+      wind: now.wind,
+      wave: now.wave,
+    };
+    keepSessions([...sessions.filter(item => item.id !== entry.id), entry]);
+    setPlanOpen(false);
+  }
+
+  function removeSession(id: string) {
+    keepSessions(sessions.filter(item => item.id !== id));
   }
 
   function chooseProfile(key: string) {
@@ -1308,6 +1452,7 @@ export default function WeatherApp() {
         </button>
         <div className="top-actions">
           <span className={`connection ${online ? 'online' : 'offline'}`}>{online ? 'LIVE' : 'OFFLINE'}</span>
+          <button type="button" className="icon-button add-session" onClick={openNewSession} aria-label="Plan a session">+</button>
           <button type="button" className={`icon-button ${busy ? 'spinning' : ''}`} onClick={() => refresh(true)} disabled={busy} aria-label="Refresh forecast">↻</button>
           <button type="button" className="icon-button" onClick={() => setSettingsOpen(true)} aria-label="Settings">≡</button>
         </div>
@@ -1386,46 +1531,24 @@ export default function WeatherApp() {
           })}
         </section>
 
-        {planProfile && plan && (() => {
-          const now = planReading(tableData, plan.date, planProfile);
-          const drop = plan.hours - now.hours;
-          const state = now.hours === 0 ? 'off' : drop >= 2 ? 'worse' : drop <= -2 ? 'better' : 'holding';
-          const moved = (was: number | null, is: number | null, digits: number, unit: string) =>
-            (was === null || is === null || Math.abs(was - is) < (digits ? 0.05 : 0.5)
-              ? null
-              : `${unit} ${was.toFixed(digits)} → ${is.toFixed(digits)}`);
-          const changes = clauses(
-            moved(plan.wave, now.wave, 1, 'sea'),
-            moved(plan.wind, now.wind, 0, 'wind'),
-          );
-          const agreement = agreementOn(tableData, plan.date);
-          return (
-            <section className={`plan-card ${state}`}>
-              <p className="plan-head">
-                PLANNED · {planProfile.label.toUpperCase()} · {dayLabel(plan.date).dow} {dayLabel(plan.date).date}
-              </p>
-              <strong>
-                {state === 'off' ? 'No longer suits' : state === 'worse' ? 'Getting worse' : state === 'better' ? 'Improving' : 'Still on'}
-                {now.hours > 0 && <span> · {now.hours} h</span>}
-              </strong>
-              <small>
-                {clauses(
-                  now.wave === null ? null : `sea ${now.wave.toFixed(1)} m`,
-                  now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
-                ) || 'no readings yet'}
-              </small>
-              {changes && <small className="plan-change">since {dayLabel(new Date(plan.setAt).toISOString().slice(0, 10)).dow}: {changes}</small>}
-              {agreement.split && (
-                <small className="plan-split">
-                  models split on {clauses(
-                    agreement.wave !== null && agreement.wave >= SPLIT_WAVE_M ? `sea by ${agreement.wave.toFixed(1)} m` : null,
-                    agreement.wind !== null && agreement.wind >= SPLIT_WIND_KT ? `wind by ${agreement.wind.toFixed(0)} kt` : null,
-                  )} — look again nearer the day
-                </small>
-              )}
-            </section>
-          );
-        })()}
+        {needsAttention && (
+          <button type="button" className={`plan-card ${needsAttention.state}`} onClick={() => setActiveView('Plans')}>
+            <p className="plan-head">
+              {needsAttention.entry.label.toUpperCase()} · {dayLabel(needsAttention.entry.date).dow} {dayLabel(needsAttention.entry.date).date}
+              {needsAttention.entry.time ? ` · ${needsAttention.entry.time}` : ''}
+            </p>
+            <strong>
+              {STATE_WORDS[needsAttention.state]}
+              {needsAttention.now.hours > 0 && <span> · {needsAttention.now.hours} h that day</span>}
+            </strong>
+            <small>
+              {clauses(
+                needsAttention.now.wave === null ? null : `sea ${needsAttention.now.wave.toFixed(1)} m`,
+                needsAttention.now.wind === null ? null : `${needsAttention.now.wind.toFixed(0)} kt`,
+              ) || 'no readings yet'}
+            </small>
+          </button>
+        )}
 
         <section className="profile-strip" aria-label="Activity">
           {PROFILES.map(entry => (
@@ -1439,16 +1562,6 @@ export default function WeatherApp() {
               <b>{entry.label}</b><small>{entry.hint}</small>
             </button>
           ))}
-          {profile && selectedDate && (
-            <button
-              type="button"
-              className={`plan-button ${plan?.date === selectedDate && plan?.profile === profile.key ? 'on' : ''}`}
-              onClick={planDay}
-            >
-              <b>{plan?.date === selectedDate && plan?.profile === profile.key ? 'Planned' : 'Plan'}</b>
-              <small>{dayLabel(selectedDate).dow} {dayLabel(selectedDate).date}</small>
-            </button>
-          )}
         </section>
 
         {profile && (spells.length
@@ -1523,13 +1636,25 @@ export default function WeatherApp() {
         </section>
       </>}
 
+      {activeView === 'Plans' && (
+        <PlansView
+          sessions={upcoming}
+          past={sessions.filter(entry => !upcoming.includes(entry))}
+          data={tableData}
+          onAdd={openNewSession}
+          onEdit={editSession}
+          onRemove={removeSession}
+        />
+      )}
       {activeView === 'Map' && <MapView location={location} />}
       {activeView === 'Saved' && <SavedView favorites={favorites} onSelect={selectLocation} onGps={requestGps} onRemove={removeFavorite} gpsError={gpsError} />}
 
       <nav className="bottom-nav" aria-label="Main navigation">
-        {(['Forecast', 'Map', 'Saved'] as ViewKey[]).map(view => (
+        {(['Forecast', 'Plans', 'Map', 'Saved'] as ViewKey[]).map(view => (
           <button type="button" key={view} className={activeView === view ? 'selected' : ''} aria-current={activeView === view ? 'page' : undefined} onClick={() => setActiveView(view)}>
-            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Map' ? '⌖' : '☆'}</span>{view}
+            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Plans' ? '⚑' : view === 'Map' ? '⌖' : '☆'}</span>
+            {view}
+            {view === 'Plans' && upcoming.length > 0 && <i className="tab-count">{upcoming.length}</i>}
           </button>
         ))}
       </nav>
@@ -1555,6 +1680,84 @@ export default function WeatherApp() {
                 <div><b>{result.name}</b><small>{result.country}</small></div>
               </button>
             ))}
+          </section>
+        </div>
+      )}
+
+      {planOpen && (
+        <div className="sheet-backdrop">
+          <button type="button" className="sheet-dismiss" aria-label="Close planner" onClick={() => setPlanOpen(false)} />
+          <section className="sheet plan-sheet" role="dialog" aria-modal="true" aria-label="Plan a session">
+            <div className="sheet-handle" />
+            <div className="sheet-title">
+              <h2>{draft.id ? 'Edit session' : 'Plan a session'}</h2>
+              <button type="button" onClick={() => setPlanOpen(false)} aria-label="Close">×</button>
+            </div>
+
+            <label className="field" htmlFor="plan-date">
+              <span>Date</span>
+              <input
+                id="plan-date"
+                type="date"
+                value={draft.date}
+                min={todayHere || undefined}
+                onChange={event => setDraft({ ...draft, date: event.target.value })}
+              />
+            </label>
+
+            <label className="field" htmlFor="plan-time">
+              <span>Time <em>optional</em></span>
+              <input
+                id="plan-time"
+                type="time"
+                step={3600}
+                value={draft.time}
+                onChange={event => setDraft({ ...draft, time: event.target.value })}
+              />
+            </label>
+            <p className="field-note">
+              Name an hour and the verdict is about that hour. Leave it empty and it is about the day.
+            </p>
+
+            <div className="field">
+              <span>Activity</span>
+              <div className="plan-profiles">
+                {PROFILES.map(entry => (
+                  <button
+                    type="button"
+                    key={entry.key}
+                    className={draft.profile === entry.key ? 'on' : ''}
+                    onClick={() => setDraft({ ...draft, profile: entry.key })}
+                  >
+                    <b>{entry.label}</b><small>{entry.hint}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {draft.date && draft.profile && (() => {
+              const chosen = PROFILES.find(entry => entry.key === draft.profile);
+              if (!chosen) return null;
+              const preview = sessionReading(tableData, { date: draft.date, time: draft.time || null }, chosen);
+              return (
+                <p className="field-note preview">
+                  {coversDate(tableData, draft.date)
+                    ? clauses(
+                      draft.time
+                        ? `${draft.time} ${preview.suitsHour ? 'suits' : 'does not suit'}`
+                        : null,
+                      `${preview.hours} h suitable that day`,
+                      preview.wave === null ? null : `sea ${preview.wave.toFixed(1)} m`,
+                      preview.wind === null ? null : `${preview.wind.toFixed(0)} kt`,
+                    )
+                    : 'Beyond the forecast range for now — it will start reporting as the day comes into range.'}
+                </p>
+              );
+            })()}
+
+            <button type="button" className="primary-action" onClick={saveDraft} disabled={!draft.date || !draft.profile}>
+              {draft.id ? 'Save changes' : 'Add session'}
+            </button>
           </section>
         </div>
       )}
@@ -2250,6 +2453,128 @@ function MapView({ location }: { location: Location }) {
         <div className="map-pin"><span aria-hidden="true">⌖</span><b>{location.name}</b></div>
       </div>
       <p className="data-note">Map data © OpenStreetMap contributors. Weather overlays are not part of this build.</p>
+    </section>
+  );
+}
+
+/**
+ * The trips already in the diary, and what the forecast has done to them.
+ *
+ * Alerts are posted by the Android side, which is the only part of this that
+ * runs when the app is closed. It writes its permission state back into
+ * storage so this page can say what is actually true rather than assuring you
+ * of notifications that were refused months ago and never arrive.
+ */
+function PlansView({ sessions, past, data, onAdd, onEdit, onRemove }: {
+  sessions: Session[];
+  past: Session[];
+  data: Forecast | null;
+  onAdd: () => void;
+  onEdit: (session: Session) => void;
+  onRemove: (id: string) => void;
+}) {
+  const notify = readStorage(NOTIFY_STATE_KEY);
+  return (
+    <section className="view-page">
+      <div className="view-heading">
+        <p className="eyebrow">IN THE DIARY</p>
+        <h1>Planned sessions</h1>
+        <p>Each one is watched against the forecast. You are told when it turns, either way.</p>
+      </div>
+
+      {notify === 'denied' && (
+        <p className="notice" role="alert">
+          Notifications are blocked, so these are only checked while you have the app open.
+          Turn them on for WeatherDeck in Android settings to be told when a session changes.
+        </p>
+      )}
+      {notify === 'granted' && sessions.length > 0 && (
+        <p className="notice quiet">Alerts are on. Checked a few times a day, and only worth a buzz when something moves.</p>
+      )}
+
+      <button type="button" className="primary-action" onClick={onAdd}>+ Plan a session</button>
+
+      {sessions.length === 0 && past.length === 0 && (
+        <p className="notice">Nothing planned. Add a date, an activity and — if you know it — the hour you mean to be on the water.</p>
+      )}
+
+      {sessions.map(session => {
+        const profile = PROFILES.find(entry => entry.key === session.profile);
+        if (!profile) return null;
+        const now = sessionReading(data, session, profile);
+        const state = sessionState(session, now);
+        const reach = coversDate(data, session.date);
+        const agreement = agreementOn(data, session.date);
+        const moved = (was: number | null, is: number | null, digits: number, unit: string) =>
+          (was === null || is === null || Math.abs(was - is) < (digits ? 0.05 : 0.5)
+            ? null
+            : `${unit} ${was.toFixed(digits)} → ${is.toFixed(digits)}`);
+        return (
+          <article className={`session-row ${reach ? state : 'far'}`} key={session.id}>
+            <button type="button" className="session-body" onClick={() => onEdit(session)}>
+              <p className="plan-head">
+                {session.label.toUpperCase()} · {dayLabel(session.date).dow} {dayLabel(session.date).date}
+                {session.time ? ` · ${session.time}` : ''}
+              </p>
+              {reach ? (
+                <>
+                  <strong>
+                    {STATE_WORDS[state]}
+                    {now.hours > 0 && <span> · {now.hours} h that day</span>}
+                  </strong>
+                  <small>
+                    {clauses(
+                      session.time && now.suitsHour !== null
+                        ? `at ${session.time}: ${now.suitsHour ? 'suitable' : 'not suitable'}`
+                        : null,
+                      now.wave === null ? null : `sea ${now.wave.toFixed(1)} m`,
+                      now.wind === null ? null : `${now.wind.toFixed(0)} kt`,
+                    ) || 'no readings yet'}
+                  </small>
+                  {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind')) && (
+                    <small className="plan-change">
+                      since {dayLabel(new Date(session.setAt).toISOString().slice(0, 10)).dow}:{' '}
+                      {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind'))}
+                    </small>
+                  )}
+                  {agreement.split && (
+                    <small className="plan-split">
+                      models split on {clauses(
+                        agreement.wave !== null && agreement.wave >= SPLIT_WAVE_M ? `sea by ${agreement.wave.toFixed(1)} m` : null,
+                        agreement.wind !== null && agreement.wind >= SPLIT_WIND_KT ? `wind by ${agreement.wind.toFixed(0)} kt` : null,
+                      )} — look again nearer the day
+                    </small>
+                  )}
+                </>
+              ) : (
+                <>
+                  <strong>Out of range</strong>
+                  <small>No forecast reaches this day yet. It starts reporting as the day comes closer.</small>
+                </>
+              )}
+            </button>
+            <button type="button" className="remove-button" onClick={() => onRemove(session.id)} aria-label={`Remove ${session.label} on ${session.date}`}>×</button>
+          </article>
+        );
+      })}
+
+      {past.length > 0 && (
+        <>
+          <p className="eyebrow past-heading">BEEN AND GONE</p>
+          {past.map(session => (
+            <article className="session-row past" key={session.id}>
+              <div className="session-body">
+                <p className="plan-head">
+                  {session.label.toUpperCase()} · {dayLabel(session.date).dow} {dayLabel(session.date).date}
+                  {session.time ? ` · ${session.time}` : ''}
+                </p>
+                <small>No longer watched.</small>
+              </div>
+              <button type="button" className="remove-button" onClick={() => onRemove(session.id)} aria-label={`Remove ${session.label} on ${session.date}`}>×</button>
+            </article>
+          ))}
+        </>
+      )}
     </section>
   );
 }
