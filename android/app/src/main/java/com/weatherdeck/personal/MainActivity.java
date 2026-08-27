@@ -51,6 +51,8 @@ public class MainActivity extends Activity {
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView webView;
+    private View insetTarget;
+    private final int[] appliedInsets = new int[4];
     private TextView statusView;
     private String lastConsoleError = "";
     private GeolocationPermissions.Callback pendingGeolocation;
@@ -158,28 +160,65 @@ public class MainActivity extends Activity {
      * rather than showing through.
      */
     private void keepClearOfSystemBars(View root) {
+        insetTarget = root;
         root.setOnApplyWindowInsetsListener((view, insets) -> {
-            int left;
-            int top;
-            int right;
-            int bottom;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                android.graphics.Insets bars = insets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                left = bars.left;
-                top = bars.top;
-                right = bars.right;
-                bottom = bars.bottom;
-            } else {
-                left = insets.getSystemWindowInsetLeft();
-                top = insets.getSystemWindowInsetTop();
-                right = insets.getSystemWindowInsetRight();
-                bottom = insets.getSystemWindowInsetBottom();
-            }
-            view.setPadding(left, top, right, bottom);
+            applyInsets(readInsets(insets));
             return insets;
         });
+        // The listener is the good path but not a reliable one: depending on the
+        // theme, the decor view can consume the insets before they get here, and
+        // then it fires with zeros and nothing moves. Every later chance to ask
+        // the window directly is taken as well, and the largest answer wins.
+        root.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { applyInsets(windowInsets()); }
+            @Override public void onViewDetachedFromWindow(View view) { }
+        });
+        root.post(() -> applyInsets(windowInsets()));
         root.requestApplyInsets();
+    }
+
+    private int[] readInsets(WindowInsets insets) {
+        if (insets == null) return null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.graphics.Insets bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            return new int[]{bars.left, bars.top, bars.right, bars.bottom};
+        }
+        return new int[]{insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()};
+    }
+
+    /** Straight from the window, which no view in the dispatch chain can have eaten. */
+    private int[] windowInsets() {
+        return insetTarget == null ? null : readInsets(insetTarget.getRootWindowInsets());
+    }
+
+    /**
+     * The last resort, and the only one that cannot come back empty: the status
+     * bar's own height from the platform's resources. It knows nothing about
+     * cutouts or gesture bars, so it is a floor rather than an answer — but a
+     * header one status bar down the screen is reachable, and a header at zero
+     * is not, because the system takes the touch before the page sees it.
+     */
+    private int statusBarFloor() {
+        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : 0;
+    }
+
+    private void applyInsets(int[] found) {
+        if (insetTarget == null) return;
+        int left = found == null ? 0 : found[0];
+        int top = Math.max(found == null ? 0 : found[1], statusBarFloor());
+        int right = found == null ? 0 : found[2];
+        int bottom = found == null ? 0 : found[3];
+        // Only ever grows within a session: a later zero reading is a mechanism
+        // failing, not the status bar going away, and shrinking on it would put
+        // the header back under the clock.
+        appliedInsets[0] = Math.max(appliedInsets[0], left);
+        appliedInsets[1] = Math.max(appliedInsets[1], top);
+        appliedInsets[2] = Math.max(appliedInsets[2], right);
+        appliedInsets[3] = Math.max(appliedInsets[3], bottom);
+        insetTarget.setPadding(appliedInsets[0], appliedInsets[1], appliedInsets[2], appliedInsets[3]);
     }
 
     /** Serves dist/ out of app assets for our own origin; anything else goes to the network. */

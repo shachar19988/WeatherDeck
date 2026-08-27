@@ -218,3 +218,8 @@
 .limit-row input{width:82px;border:1px solid var(--line);border-radius:10px;background:#0b1f28;color:var(--ink);font:inherit;font-size:13px;text-align:center;padding:8px}
 .limit-row b{font-size:9px;font-weight:600;color:var(--muted);min-width:46px}
 .reset-limits{width:100%;margin-top:12px;border:1px solid #5c3a2e;border-radius:11px;background:transparent;color:#ffb18d;font-size:11px;padding:10px}
+
+/* Which build this is. Present so a screenshot of a problem carries its own
+   version, rather than leaving "still broken" and "still the old APK"
+   indistinguishable. */
+.build-stamp{margin:4px 0 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--accent)}

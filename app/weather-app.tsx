@@ -2123,6 +2123,11 @@ export default function WeatherApp() {
             </div>
 
             <div className="about-box">
+              <b>Build</b>
+              <p className="build-stamp">{__BUILD__}</p>
+            </div>
+
+            <div className="about-box">
               <b>Data sources</b>
               <p>ECMWF, NOAA GFS, DWD ICON and ECMWF AIFS via Open-Meteo. Marine forecasts combine public wave and ocean models. Not every model publishes every variable — missing readings are shown as “—” and never estimated.</p>
             </div>
