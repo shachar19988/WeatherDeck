@@ -193,8 +193,12 @@ final class PlanWatch {
      * Averages the per-model series the marine API returns as wave_height_gwam,
      * wave_height_ewam and so on, matching what the app shows. Nothing is
      * invented: an hour no model answered for stays null.
+     *
+     * Android's JSONArray.put(double) rejects NaN and infinity rather than
+     * storing them, which is the JSONException here; the caller already handles
+     * it by leaving the plan unchecked this round rather than guessing.
      */
-    private static JSONArray meanSeries(JSONObject hourly, String key) {
+    private static JSONArray meanSeries(JSONObject hourly, String key) throws JSONException {
         java.util.List<JSONArray> members = new java.util.ArrayList<>();
         for (java.util.Iterator<String> names = hourly.keys(); names.hasNext(); ) {
             String name = names.next();
