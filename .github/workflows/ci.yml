@@ -29,6 +29,8 @@ jobs:
   android:
     name: Build debug APK
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         # Depth 2 so the build stamp can reach HEAD^2 — on a pull_request run
@@ -59,3 +61,20 @@ jobs:
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 30
+
+      # A permanent address for the newest build. The artifact above needs a
+      # GitHub login and arrives as a zip, which is no use on a phone; a release
+      # asset is a direct download anyone can tap. The tag is reused rather than
+      # versioned so the link never changes.
+      - name: Publish as the rolling latest build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk WeatherDeck.apk
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create latest WeatherDeck.apk             --title "Latest build"             --prerelease             --notes "Debug build of ${BUILD_SHA}, made $(date -u '+%Y-%m-%d %H:%M') UTC.
+
+          The build id is shown in the app under Preferences, so a screenshot always says which build it came from.
+
+          Debug builds are signed with a key generated per CI run, so Android will ask you to uninstall the previous copy first. That also clears the app's saved sessions and spots."
