@@ -290,6 +290,12 @@ cd android && ./gradlew assembleDebug
 
 The Gradle build fails early with a clear message if `dist/` has not been built.
 
+To install without a toolchain, take the APK from CI instead: open the Actions
+run for the branch, and download `weatherdeck-debug-apk` from the run page.
+Debug builds are signed with the local debug key, so if a copy signed with a
+different key is already installed, uninstall it first — Android refuses the
+upgrade otherwise.
+
 Release builds are signed only when the keystore is supplied through the
 environment; otherwise `assembleRelease` produces an unsigned APK:
 
