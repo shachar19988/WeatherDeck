@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Only the views on the RemoteViews allowlist appear here — FrameLayout,
-  LinearLayout, ViewFlipper, ImageView and TextView. Space and View are not on
-  it and would fail to inflate, so the top/bottom split is done with
-  layout_gravity on two FrameLayout children instead of a spacer.
+  Only views on the RemoteViews allowlist appear here: FrameLayout, ImageView
+  and TextView. Space and View are not on it, so the top/bottom split is done
+  with layout_gravity.
 
-  The scene is three pre-rendered bitmaps the system flips between; the readings
-  sit above it as real text so they stay sharp and cost nothing to redraw.
+  Every TextView ships a default value. Before the first successful update, and
+  after a failed one, the widget shows a dash rather than empty space, so it can
+  never look broken without saying so.
 -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/widget_root"
@@ -14,134 +14,88 @@
     android:layout_height="match_parent"
     android:background="@drawable/widget_background">
 
-    <ViewFlipper
+    <ImageView
         android:id="@+id/widget_scene"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:autoStart="true"
-        android:flipInterval="1100">
-
-        <ImageView
-            android:id="@+id/widget_frame_0"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:scaleType="centerCrop"
-            android:contentDescription="@string/widget_scene_description" />
-
-        <ImageView
-            android:id="@+id/widget_frame_1"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:scaleType="centerCrop"
-            android:contentDescription="@string/widget_scene_description" />
-
-        <ImageView
-            android:id="@+id/widget_frame_2"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:scaleType="centerCrop"
-            android:contentDescription="@string/widget_scene_description" />
-    </ViewFlipper>
+        android:scaleType="centerCrop"
+        android:contentDescription="@string/widget_scene_description" />
 
     <TextView
         android:id="@+id/widget_place"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:padding="16dp"
-        android:textColor="#EDF6F7"
-        android:textSize="15sp"
-        android:textStyle="bold"
-        android:shadowColor="#B3000000"
-        android:shadowRadius="4"
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingTop="12dp"
+        android:text="@string/widget_placeholder"
+        android:textColor="#E6F3F6"
+        android:textSize="13sp"
         android:maxLines="1"
-        android:ellipsize="end" />
+        android:ellipsize="end"
+        android:shadowColor="#99000000"
+        android:shadowRadius="4" />
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingStart="14dp"
+        android:paddingEnd="14dp"
+        android:paddingBottom="12dp">
 
         <TextView
             android:id="@+id/widget_temp"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:text="@string/widget_placeholder"
             android:textColor="#FFFFFF"
-            android:textSize="28sp"
+            android:textSize="34sp"
             android:textStyle="bold"
-            android:shadowColor="#B3000000"
+            android:maxLines="1"
+            android:shadowColor="#99000000"
             android:shadowRadius="5" />
 
         <TextView
+            android:id="@+id/widget_wind"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="@string/widget_temperature_label"
-            android:textColor="#B9CBD2"
-            android:textSize="9sp" />
+            android:paddingTop="2dp"
+            android:text="@string/widget_placeholder"
+            android:textColor="#F2FAFC"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:shadowColor="#99000000"
+            android:shadowRadius="4" />
 
-        <LinearLayout
+        <TextView
+            android:id="@+id/widget_sea"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:paddingTop="12dp">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/widget_wind"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:shadowColor="#B3000000"
-                    android:shadowRadius="4" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/widget_wind_label"
-                    android:textColor="#B9CBD2"
-                    android:textSize="9sp" />
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:id="@+id/widget_wave"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textColor="#FFFFFF"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:shadowColor="#B3000000"
-                    android:shadowRadius="4" />
-
-                <TextView
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/widget_wave_label"
-                    android:textColor="#B9CBD2"
-                    android:textSize="9sp" />
-            </LinearLayout>
-        </LinearLayout>
+            android:text="@string/widget_placeholder"
+            android:textColor="#9FD9E4"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:shadowColor="#99000000"
+            android:shadowRadius="4" />
 
         <TextView
             android:id="@+id/widget_updated"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:paddingTop="10dp"
-            android:textColor="#93A9B1"
-            android:textSize="9sp" />
+            android:paddingTop="4dp"
+            android:text="@string/widget_no_reading"
+            android:textColor="#C6D9E0"
+            android:textSize="11sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:shadowColor="#99000000"
+            android:shadowRadius="3" />
     </LinearLayout>
 </FrameLayout>

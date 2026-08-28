@@ -69,6 +69,11 @@ final class WidgetData {
         return new WidgetData(prefs(context));
     }
 
+    static boolean olderThan(Context context, long ageMs) {
+        long updated = prefs(context).getLong(KEY_UPDATED, 0L);
+        return updated <= 0L || System.currentTimeMillis() - updated > ageMs;
+    }
+
     static boolean has(double value) {
         return !Double.isNaN(value);
     }
@@ -155,7 +160,7 @@ final class WidgetData {
         return new double[]{low, high};
     }
 
-    private static JSONObject fetch(String url) throws IOException, JSONException {
+    static JSONObject fetch(String url) throws IOException, JSONException {
         HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
         connection.setConnectTimeout(TIMEOUT_MS);
         connection.setReadTimeout(TIMEOUT_MS);

@@ -9,11 +9,13 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.webkit.ConsoleMessage;
 import android.webkit.GeolocationPermissions;
 import android.webkit.ServiceWorkerClient;
@@ -42,11 +44,15 @@ public class MainActivity extends Activity {
     private static final String APP_HOST = "appassets.androidplatform.net";
     private static final String APP_ORIGIN = "https://" + APP_HOST;
     private static final int LOCATION_REQUEST = 100;
+    private static final int NOTIFICATION_REQUEST = 101;
     private static final int READY_POLL_MS = 100;
     private static final int READY_ATTEMPTS = 40;
+    private static final long WIDGET_REFRESH_AFTER_MS = 30L * 60L * 1000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private WebView webView;
+    private View insetTarget;
+    private final int[] appliedInsets = new int[4];
     private TextView statusView;
     private String lastConsoleError = "";
     private GeolocationPermissions.Callback pendingGeolocation;
@@ -71,6 +77,7 @@ public class MainActivity extends Activity {
         webView.setVisibility(View.INVISIBLE);
         root.addView(webView, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT));
         setContentView(root);
+        keepClearOfSystemBars(root);
 
         if ((getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             WebView.setWebContentsDebuggingEnabled(true);
@@ -138,6 +145,82 @@ public class MainActivity extends Activity {
         webView.loadUrl(APP_ORIGIN + "/index.html");
     }
 
+    /**
+     * Keeps the page out from under the status and navigation bars.
+     *
+     * From targetSdk 35 Android lays the window out edge to edge and ignores
+     * statusBarColor, so the WebView filled the whole screen and the header drew
+     * beneath the clock — the + in the top bar was physically unreachable.
+     *
+     * This is done here rather than with CSS env(safe-area-inset-*) on purpose.
+     * That depends on the WebView reporting insets into the page, which varies
+     * by Android and WebView version, and this app runs from API 26. Padding the
+     * root view is the same answer everywhere. The root already carries the
+     * page's own background colour, so the strip behind the status bar matches
+     * rather than showing through.
+     */
+    private void keepClearOfSystemBars(View root) {
+        insetTarget = root;
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            applyInsets(readInsets(insets));
+            return insets;
+        });
+        // The listener is the good path but not a reliable one: depending on the
+        // theme, the decor view can consume the insets before they get here, and
+        // then it fires with zeros and nothing moves. Every later chance to ask
+        // the window directly is taken as well, and the largest answer wins.
+        root.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { applyInsets(windowInsets()); }
+            @Override public void onViewDetachedFromWindow(View view) { }
+        });
+        root.post(() -> applyInsets(windowInsets()));
+        root.requestApplyInsets();
+    }
+
+    private int[] readInsets(WindowInsets insets) {
+        if (insets == null) return null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.graphics.Insets bars = insets.getInsets(
+                    WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            return new int[]{bars.left, bars.top, bars.right, bars.bottom};
+        }
+        return new int[]{insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()};
+    }
+
+    /** Straight from the window, which no view in the dispatch chain can have eaten. */
+    private int[] windowInsets() {
+        return insetTarget == null ? null : readInsets(insetTarget.getRootWindowInsets());
+    }
+
+    /**
+     * The last resort, and the only one that cannot come back empty: the status
+     * bar's own height from the platform's resources. It knows nothing about
+     * cutouts or gesture bars, so it is a floor rather than an answer — but a
+     * header one status bar down the screen is reachable, and a header at zero
+     * is not, because the system takes the touch before the page sees it.
+     */
+    private int statusBarFloor() {
+        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
+        return id > 0 ? getResources().getDimensionPixelSize(id) : 0;
+    }
+
+    private void applyInsets(int[] found) {
+        if (insetTarget == null) return;
+        int left = found == null ? 0 : found[0];
+        int top = Math.max(found == null ? 0 : found[1], statusBarFloor());
+        int right = found == null ? 0 : found[2];
+        int bottom = found == null ? 0 : found[3];
+        // Only ever grows within a session: a later zero reading is a mechanism
+        // failing, not the status bar going away, and shrinking on it would put
+        // the header back under the clock.
+        appliedInsets[0] = Math.max(appliedInsets[0], left);
+        appliedInsets[1] = Math.max(appliedInsets[1], top);
+        appliedInsets[2] = Math.max(appliedInsets[2], right);
+        appliedInsets[3] = Math.max(appliedInsets[3], bottom);
+        insetTarget.setPadding(appliedInsets[0], appliedInsets[1], appliedInsets[2], appliedInsets[3]);
+    }
+
     /** Serves dist/ out of app assets for our own origin; anything else goes to the network. */
     private WebResourceResponse serveAsset(Uri uri) {
         if (uri == null || !APP_HOST.equals(uri.getHost())) return null;
@@ -188,6 +271,7 @@ public class MainActivity extends Activity {
                         webView.setVisibility(View.VISIBLE);
                         statusView.setVisibility(View.GONE);
                         syncWidgetLocation();
+                        syncPlan();
                     } else if (attempt < READY_ATTEMPTS) {
                         handler.postDelayed(() -> pollForInterface(attempt + 1), READY_POLL_MS);
                     } else {
@@ -216,6 +300,11 @@ public class MainActivity extends Activity {
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == NOTIFICATION_REQUEST) {
+            // Answered either way, the page should stop guessing.
+            reportNotificationState();
+            return;
+        }
         if (requestCode != LOCATION_REQUEST || pendingGeolocation == null) return;
         boolean granted = false;
         for (int result : grantResults) {
@@ -224,6 +313,86 @@ public class MainActivity extends Activity {
         pendingGeolocation.invoke(pendingGeolocationOrigin, granted, false);
         pendingGeolocation = null;
         pendingGeolocationOrigin = null;
+    }
+
+    /**
+     * The same trip out for the planned day: the marked date, its activity and
+     * that activity's thresholds as plain numbers, so the background check can
+     * apply them without a second copy of the rules living in Java.
+     */
+    private void syncPlan() {
+        if (webView == null) return;
+        reportNotificationState();
+        webView.evaluateJavascript("localStorage.getItem('weatherdeck:events')", value -> {
+            String stored = unwrap(value);
+            SharedPreferences prefs = WidgetData.prefs(this);
+            String previous = prefs.getString(PlanWatch.KEY_PLAN, "");
+            if (stored == null || "[]".equals(stored.replace(" ", ""))) {
+                if (!previous.isEmpty()) {
+                    prefs.edit().remove(PlanWatch.KEY_PLAN).apply();
+                    PlanWatch.reset(this, java.util.Collections.<String>emptySet());
+                    PlanWatch.cancel(this);
+                }
+                return;
+            }
+            // Re-armed on every visit, because alarms do not survive a reboot.
+            PlanWatch.schedule(this);
+            if (stored.equals(previous)) return;
+            prefs.edit().putString(PlanWatch.KEY_PLAN, stored).apply();
+            // Baselines for sessions that are gone, or were edited, go with them.
+            PlanWatch.reset(this, idsIn(stored));
+            requestNotificationPermission();
+        });
+    }
+
+    private static java.util.Set<String> idsIn(String sessions) {
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        try {
+            org.json.JSONArray parsed = new org.json.JSONArray(sessions);
+            for (int i = 0; i < parsed.length(); i++) {
+                org.json.JSONObject entry = parsed.optJSONObject(i);
+                if (entry != null) ids.add(entry.optString("id", entry.optString("date", "")));
+            }
+        } catch (org.json.JSONException malformed) {
+            // Keeping nothing is the safe direction here: a session quietly
+            // starting its comparison over beats one inheriting a stale baseline.
+        }
+        return ids;
+    }
+
+    /**
+     * Tells the page whether alerts can actually be posted. The page cannot ask
+     * Android itself — no JavaScript interface is installed, deliberately — so
+     * this is the one safe direction: Java writes, the page reads. Without it
+     * the planner would promise notifications that were refused and never come.
+     */
+    private void reportNotificationState() {
+        if (webView == null) return;
+        boolean granted = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU
+                || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED;
+        String state = granted ? "granted" : "denied";
+        WidgetData.prefs(this).edit().putString(PlanWatch.KEY_NOTIFY_STATE, state).apply();
+        webView.evaluateJavascript(
+                "try{localStorage.setItem('weatherdeck:notify','" + state + "')}catch(e){}", null);
+    }
+
+    /** evaluateJavascript hands back a JSON string literal, or the text "null". */
+    private static String unwrap(String value) {
+        if (value == null || "null".equals(value) || value.isEmpty()) return null;
+        try {
+            Object parsed = new org.json.JSONTokener(value).nextValue();
+            String text = parsed == null ? null : parsed.toString();
+            return text == null || text.isEmpty() || "null".equals(text) ? null : text;
+        } catch (org.json.JSONException malformed) {
+            return null;
+        }
+    }
+
+    /** Only asked for once a day has been marked, because only then is there anything to say. */
+    private void requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.TIRAMISU) return;
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) return;
+        requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_REQUEST);
     }
 
     /**
@@ -261,6 +430,10 @@ public class MainActivity extends Activity {
     protected void onPause() {
         super.onPause();
         syncWidgetLocation();
+        syncPlan();
+        // Closing the app is the cheapest moment to top the widget up, but only
+        // if what it holds has actually gone stale.
+        if (WidgetData.olderThan(this, WIDGET_REFRESH_AFTER_MS)) WidgetProvider.requestRefresh(this);
     }
 
     private void showFailure(String message) {

@@ -5,14 +5,28 @@ type Location = { name: string; country: string; latitude: number; longitude: nu
 type Series = (number | null)[];
 type Hourly = { time: string[] } & Record<string, Series | string[]>;
 type Forecast = { hourly: Hourly; hourly_units?: Record<string, string>; utc_offset_seconds?: number };
-type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS';
+type ModelKey = 'ECMWF' | 'GFS' | 'ICON' | 'AIFS' | 'UKMO' | 'GEM';
 type ActiveModel = ModelKey | 'MEAN';
-type ViewKey = 'Forecast' | 'Map' | 'Saved';
+type ViewKey = 'Forecast' | 'Plans' | 'Map' | 'Saved';
 type DataSource = 'live' | 'cache' | 'none';
 type CachePayload = { forecasts: Partial<Record<ModelKey, Forecast>>; marine: Forecast | null; extended: Forecast | null; savedAt: number };
 
+/**
+ * Six models, chosen by measurement rather than by reputation.
+ *
+ * KNMI, DMI and MET Norway were tried and dropped: for this coast their series
+ * come back byte-identical to ECMWF, because their high-resolution domains stop
+ * well short of the eastern Mediterranean and they serve IFS instead. Adding
+ * them would have weighted ECMWF three times over inside a mean that claimed
+ * seven independent members.
+ *
+ * UKMO and GEM do differ here — 1.9 and 1.4 knots of mean absolute difference
+ * from ECMWF respectively — so they add real spread. Both run shorter than the
+ * others, which the table already handles by deciding coverage on the values.
+ */
 const MODEL_IDS: Record<ModelKey, string> = {
-  ECMWF: 'ecmwf_ifs', GFS: 'gfs_seamless', ICON: 'icon_global', AIFS: 'ecmwf_aifs025_single',
+  ECMWF: 'ecmwf_ifs', GFS: 'gfs_seamless', ICON: 'icon_global',
+  AIFS: 'ecmwf_aifs025_single', UKMO: 'ukmo_seamless', GEM: 'gem_seamless',
 };
 const MODEL_KEYS = Object.keys(MODEL_IDS) as ModelKey[];
 const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
@@ -20,11 +34,13 @@ const MODEL_META: Record<ModelKey, { provider: string; resolution: string }> = {
   GFS: { provider: 'NOAA', resolution: '11–25 km' },
   ICON: { provider: 'DWD', resolution: '11 km' },
   AIFS: { provider: 'ECMWF AI', resolution: '25 km' },
+  UKMO: { provider: 'UK Met Office', resolution: '10 km' },
+  GEM: { provider: 'Env. Canada', resolution: '15 km' },
 };
 const DEFAULT_LOCATION: Location = { name: 'Haifa', country: 'Israel', latitude: 32.794, longitude: 34.9896 };
 const WEATHER_VARS = 'temperature_2m,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cape,is_day';
 const LONG_RANGE_VARS = 'temperature_2m,temperature_2m_spread,relative_humidity_2m,precipitation,cloud_cover,pressure_msl,wind_speed_10m,wind_speed_10m_spread,wind_direction_10m,wind_gusts_10m';
-const MARINE_VARS = 'wave_height,wave_direction,wave_period,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
+const MARINE_VARS = 'wave_height,wave_direction,wave_period,sea_surface_temperature,swell_wave_height,swell_wave_direction,swell_wave_period,wind_wave_height,wind_wave_period,ocean_current_velocity,ocean_current_direction,sea_level_height_msl';
 
 const SPREAD_SUFFIX = '__spread';
 const COUNT_SUFFIX = '__models';
@@ -32,35 +48,146 @@ const CONSENSUS_KEYS = ['temperature_2m', 'relative_humidity_2m', 'precipitation
 // Bearings cannot be averaged arithmetically: the mean of 350 and 10 is 180,
 // which points the opposite way. They are averaged as unit vectors instead.
 const CIRCULAR_KEYS = new Set(['wind_direction_10m']);
-const MARINE_KEYS = MARINE_VARS.split(',');
+
+/*
+ * A disagreement warning that fires every day is wallpaper, so these are set
+ * from what the models actually do here rather than from a round number.
+ * Measured over ten days at Haifa: wave spread ran a median of 0.12 m and a
+ * 90th percentile of 0.22, wind spread a median of 3.7 kt and a 90th of 5.6.
+ * These sit just above that, so a split reads as unusual — which is the only
+ * thing that makes it worth reading.
+ */
+const SPLIT_WAVE_M = 0.25;
+const SPLIT_WIND_KT = 6;
+const WIND_AGREEMENT_KEYS = ['wind_speed_10m' + SPREAD_SUFFIX, 'wind_speed_10m' + COUNT_SUFFIX];
+
+const OFFSHORE_KEY = 'offshore';
+const SHORE_PREFIX = 'weatherdeck:shore:';
+const SHORE_SECTORS = 16;
+const SHORE_RINGS_KM = [5, 12];
+type ShoreMask = { sectors: boolean[]; water: boolean };
+/**
+ * Waves do not come from the six weather models in the picker — they come from
+ * wave models, and until now from exactly one of them, so the sea was the one
+ * quantity in this app that could never be doubted. Asking several the same
+ * question is what makes "how sure is this" answerable for the water too.
+ *
+ * best_match is deliberately absent. Measured at Haifa, Biarritz and Bali it is
+ * byte-identical to meteofrance_wave, so keeping both would weight MeteoFrance
+ * twice and quietly narrow the spread. ncep_gfswave025 is out for a different
+ * reason: at Biarritz it sits 1.2 m from every other model while its own finer
+ * sibling agrees with them, which is a grid point in the wrong place rather
+ * than a real disagreement.
+ *
+ * Regional models simply do not answer outside their domain — ewam is missing
+ * at Bali, and both it and ncep at Cape Town — and the API drops them without
+ * complaint. Each hour therefore carries how many models it is made of.
+ */
+const WAVE_MODELS = 'ecmwf_wam025,gwam,ewam,ncep_gfswave016,meteofrance_wave';
+const WAVE_ENSEMBLE_KEYS = ['wave_height', 'swell_wave_height', 'swell_wave_period', 'wind_wave_height'];
+
+const MARINE_KEYS = [
+  ...MARINE_VARS.split(','),
+  ...WAVE_ENSEMBLE_KEYS.flatMap(key => [key + COUNT_SUFFIX, key + SPREAD_SUFFIX]),
+];
 const MODEL_ROW_PREFIX = 'model:';
 
 /**
- * Wind is the variable this app exists for, so it is the one that gets a colour
- * scale — a single documented blue ramp, dark-anchored so calm air recedes into
- * the panel and a gale reads brightest. One sequential encoding doing one job
- * beats colouring every row; every cell still shows its number, so colour is
- * never the only channel.
+ * One severity language, green through yellow to red, shared by every reading
+ * that can make a day unusable. Each reading brings its own thresholds; the
+ * colours never change.
  *
- * Checked: lightness is monotone across the ramp, every  adjacent step differs by
- * dL >= 0.09, and each band's ink clears 4.5:1 against its own fill.
+ * A severity scale rather than a plain magnitude one: on a board or at a helm,
+ * 8 kt and 28 kt are not two amounts of the same thing, they are two different
+ * days, and green-to-red is the convention that already means that. The row
+ * label says which reading it is; the colour says how much it matters, and it
+ * means the same thing wherever it appears.
+ *
+ * Every band's ink was checked against its own fill rather than picked by eye —
+ * worst case 4.86:1, which matters on a phone in direct sun as much as anywhere.
+ * Each cell prints its number too, so colour is never the only channel.
  */
-// Two series, validated against the panel surface in dark mode: lightness band,
-// chroma floor, CVD separation, normal-vision floor and contrast all pass.
-const SERIES_WIND = '#3987e5';
-const SERIES_GUST = '#d95926';
-
-const WIND_SCALE = [
-  { limit: 5, fill: '#0d366b', ink: '#edf6f7' },
-  { limit: 10, fill: '#184f95', ink: '#edf6f7' },
-  { limit: 15, fill: '#256abf', ink: '#edf6f7' },
-  { limit: 20, fill: '#3987e5', ink: '#062019' },
-  { limit: 25, fill: '#6da7ec', ink: '#062019' },
-  { limit: 30, fill: '#9ec5f4', ink: '#062019' },
-  { limit: Infinity, fill: '#cde2fb', ink: '#062019' },
+const SEVERITY = [
+  { fill: '#0a6e3a', ink: '#ffffff' },
+  { fill: '#2f9412', ink: '#12100a' },
+  { fill: '#8ab800', ink: '#12100a' },
+  { fill: '#f0c000', ink: '#12100a' },
+  { fill: '#f28a00', ink: '#12100a' },
+  { fill: '#e2551c', ink: '#12100a' },
+  { fill: '#c81e1e', ink: '#ffffff' },
 ];
+function banded(limits: number[]) {
+  return limits.map((limit, index) => ({ limit, ...SEVERITY[index] }));
+}
+// Green to 10 kt, deepest red from 25 up.
+/**
+ * How far out the day is, which is a different thing from how rough it is. This
+ * used to be a card of its own above the graph; it now tints the day chips and
+ * the table's eyebrow instead, because a reliability hint that costs a block of
+ * screen is being charged more than it is worth.
+ */
+function confidenceAt(dayIndex: number) {
+  return dayIndex < 5
+    ? { label: 'High confidence', className: 'high', detail: 'Best operational guidance' }
+    : dayIndex < 10
+      ? { label: 'Medium confidence', className: 'medium', detail: 'Model differences are increasing' }
+      : dayIndex < 16
+        ? { label: 'Low confidence', className: 'low', detail: 'Use as planning guidance only' }
+        : { label: 'Very low confidence', className: 'very-low', detail: 'Experimental long-range trend' };
+}
+
+const WIND_SCALE = banded([10, 13, 16, 19, 22, 25, Infinity]);
+// Green to half a metre, deepest red from two up.
+const WAVE_SCALE = banded([0.5, 0.8, 1.1, 1.4, 1.7, 2, Infinity]);
 function windTone(value: number) {
   return WIND_SCALE.find(band => value < band.limit) ?? WIND_SCALE[WIND_SCALE.length - 1];
+}
+
+/**
+ * Temperature reads cool to warm. It never enters the wind ramp's green, and it
+ * is a different row, so the two scales do not compete. Every band's ink was
+ * checked against its own fill; worst case 5.20:1.
+ */
+const TEMP_SCALE = [
+  { limit: 8, fill: '#2a6fb0', ink: '#ffffff' },
+  { limit: 14, fill: '#3f93b8', ink: '#12100a' },
+  { limit: 19, fill: '#4aa596', ink: '#12100a' },
+  { limit: 24, fill: '#c9a72e', ink: '#12100a' },
+  { limit: 29, fill: '#e08a2c', ink: '#12100a' },
+  { limit: 34, fill: '#dd5f28', ink: '#12100a' },
+  { limit: Infinity, fill: '#c8332a', ink: '#ffffff' },
+];
+function tempTone(value: number) {
+  return TEMP_SCALE.find(band => value < band.limit) ?? TEMP_SCALE[TEMP_SCALE.length - 1];
+}
+
+/**
+ * A skipper thinks in force, not knots. Upper bounds of each force in knots,
+ * from the Beaufort scale as defined for wind at 10 m — which is exactly the
+ * height Open-Meteo reports.
+ */
+const BEAUFORT_LIMITS = [1, 4, 7, 11, 17, 22, 28, 34, 41, 48, 56, 64];
+const BEAUFORT_NAMES = ['calm', 'light air', 'light breeze', 'gentle breeze', 'moderate breeze',
+  'fresh breeze', 'strong breeze', 'near gale', 'gale', 'strong gale', 'storm', 'violent storm', 'hurricane'];
+function beaufort(knots: number | null) {
+  if (knots === null) return null;
+  const force = BEAUFORT_LIMITS.findIndex(limit => knots < limit);
+  const index = force < 0 ? BEAUFORT_LIMITS.length : force;
+  return { force: index, name: BEAUFORT_NAMES[index] };
+}
+
+function waveTone(value: number) {
+  return WAVE_SCALE.find(band => value < band.limit) ?? WAVE_SCALE[WAVE_SCALE.length - 1];
+}
+
+/**
+ * Averaged in plain sRGB. Adjacent ramp steps are close enough that a
+ * perceptual blend would not look different, and this runs per cell.
+ */
+function mixHex(a: string, b: string) {
+  const channel = (hex: string, at: number) => parseInt(hex.slice(at, at + 2), 16);
+  const pair = (at: number) => Math.round((channel(a, at) + channel(b, at)) / 2).toString(16).padStart(2, '0');
+  return `#${pair(1)}${pair(3)}${pair(5)}`;
 }
 
 const CACHE_PREFIX = 'weatherdeck:cache:';
@@ -124,6 +251,784 @@ function withSeries(base: Forecast | null, source: Forecast | null | undefined, 
   }
   return { ...base, hourly: hourly as Hourly };
 }
+/**
+ * Joins the operational model to the ensemble into one series covering the whole
+ * range: the operational value wherever it exists, the ensemble beyond it.
+ *
+ * The table used to be built one day at a time, which let each day pick its own
+ * source. A table that scrolls straight through three weeks cannot do that, so
+ * the choice moves here, hour by hour, and stays the rule the app already
+ * follows — operational while it publishes, ensemble after.
+ */
+function stitch(primary: Forecast | null, fallback: Forecast | null): Forecast | null {
+  if (!fallback?.hourly?.time?.length) return primary;
+  if (!primary?.hourly?.time?.length) return fallback;
+  const axis = primary.hourly.time.length >= fallback.hourly.time.length ? primary : fallback;
+  const other = axis === primary ? fallback : primary;
+  const positions = new Map<string, number>();
+  other.hourly.time.forEach((time, index) => positions.set(time, index));
+
+  const keys = new Set([...Object.keys(primary.hourly), ...Object.keys(fallback.hourly)]);
+  keys.delete('time');
+  const hourly: Record<string, Series | string[]> = { time: axis.hourly.time };
+  for (const key of keys) {
+    hourly[key] = axis.hourly.time.map((time, index) => {
+      const at = (source: Forecast) => reading(source, key, source === axis ? index : (positions.get(time) ?? -1));
+      return at(primary) ?? at(fallback);
+    });
+  }
+  return { hourly: hourly as Hourly, utc_offset_seconds: axis.utc_offset_seconds };
+}
+
+/**
+ * The ensemble publishes no is_day, so past the operational range every hour read
+ * as unknown — and an unknown that counted as daylight quietly turned every night
+ * out there into a paddling window.
+ *
+ * Daylight is astronomy, not forecast, so the pattern from the last day that does
+ * publish it is reused by hour of day. Over the five or six days this fills, the
+ * sunrise moves by a few minutes, well below the resolution anything here is
+ * decided at.
+ */
+function carryDaylight(base: Forecast | null): Forecast | null {
+  if (!base || !hasSeries(base, 'is_day')) return base;
+  const pattern = new Map<string, number>();
+  base.hourly.time.forEach((time, index) => {
+    const value = reading(base, 'is_day', index);
+    if (value !== null) pattern.set(time.slice(11, 13), value);
+  });
+  const hourly: Record<string, Series | string[]> = { ...base.hourly };
+  hourly.is_day = base.hourly.time.map((time, index) =>
+    reading(base, 'is_day', index) ?? pattern.get(time.slice(11, 13)) ?? null);
+  return { ...base, hourly: hourly as Hourly };
+}
+
+const MATCH_KEY = 'profile_match';
+const PROFILE_KEY = 'weatherdeck:profile';
+const SESSIONS_KEY = 'weatherdeck:events';
+/**
+ * Written by the Android side after it asks for the notification permission.
+ * The page cannot read an Android permission itself — no JavaScript interface
+ * is installed, deliberately — so this is the one direction that is safe:
+ * Java tells the page, the page never calls Java.
+ */
+const NOTIFY_STATE_KEY = 'weatherdeck:notify';
+// The single planned day this replaced. Read once, then left alone.
+const LEGACY_PLAN_KEY = 'weatherdeck:plan';
+const MIN_WINDOW_HOURS = 2;
+
+type Conditions = {
+  wind: number | null;
+  gust: number | null;
+  wave: number | null;
+  period: number | null;
+  offshore: boolean;
+  daylight: boolean;
+  water: number | null;
+  swell: number | null;
+  swellPeriod: number | null;
+  windWave: number | null;
+};
+/** A value at the precision it is printed at, so badges agree with the numbers. */
+function shown(value: number | null, digits: number) {
+  return value === null ? null : Number(value.toFixed(digits));
+}
+
+/**
+ * Lets a sheet be pushed back down with a thumb, which is how every other
+ * bottom sheet on the phone behaves — until now the only way out was the small
+ * × in the corner, and a drag did nothing at all.
+ *
+ * The drag is taken from the handle and title only. Starting it anywhere in the
+ * body would fight the sheet's own scrolling, and a settings panel that
+ * sometimes scrolls and sometimes closes under the same gesture is worse than
+ * one that never closes.
+ */
+function useSheetDrag(onClose: () => void) {
+  const from = useRef<number | null>(null);
+
+  // The sheet is found from the event rather than held in a ref: a ref passed
+  // in cannot be written through, and one returned would be read during render.
+  // The grip always sits inside the sheet, so the event already knows it.
+  const sheetOf = (event: React.TouchEvent) =>
+    (event.currentTarget as HTMLElement).closest('.sheet') as HTMLElement | null;
+
+  const move = (event: React.TouchEvent) => {
+    const node = sheetOf(event);
+    if (from.current === null || !node) return;
+    const travelled = Math.max(0, event.touches[0].clientY - from.current);
+    node.style.transition = 'none';
+    node.style.transform = `translateY(${travelled}px)`;
+  };
+
+  const end = (event: React.TouchEvent) => {
+    const node = sheetOf(event);
+    if (from.current === null || !node) return;
+    const travelled = Number(/translateY\((\d+(?:\.\d+)?)px\)/.exec(node.style.transform)?.[1] ?? 0);
+    from.current = null;
+    node.style.transition = '';
+    node.style.transform = '';
+    // A quarter of the sheet's own height, so a tall panel is not dismissed by
+    // the same flick that would barely move a short one.
+    if (travelled > node.getBoundingClientRect().height / 4) onClose();
+  };
+
+  return {
+    onTouchStart: (event: React.TouchEvent) => { from.current = event.touches[0].clientY; },
+    onTouchMove: move,
+    onTouchEnd: end,
+    onTouchCancel: end,
+  };
+}
+
+/** Drops the clauses whose reading is missing rather than printing "sea — m". */
+function clauses(...parts: (string | null)[]) {
+  return parts.filter((part): part is string => part !== null).join(' · ');
+}
+
+type Spell = { start: number; end: number; hours: number; wind: number | null; wave: number | null;
+  period: number | null; water: number | null; swell: number | null; swellPeriod: number | null };
+/**
+ * Thresholds as plain numbers rather than as code, so the same set can be handed
+ * to the Android side for the planned-day check without reimplementing any of
+ * the rules in Java. One definition, two readers.
+ */
+type Limits = {
+  waveMin?: number;
+  waveMax?: number;
+  /*
+   * Total wave height answers "how much water is moving", which is the right
+   * question for a flat-water paddle or a boat full of guests. It is the wrong
+   * question for surfing one: 1.2 m of clean groundswell at 8 s is a session
+   * and 1.2 m of local wind chop at 4 s is a washing machine, and until now
+   * this app could not tell the two apart.
+   */
+  swellMin?: number;
+  swellMax?: number;
+  swellPeriodMin?: number;
+  windWaveMax?: number;
+  windMin?: number;
+  windMax?: number;
+  gustMax?: number;
+  periodMin?: number;
+  waterMin?: number;
+  daylight?: boolean;
+  noOffshore?: boolean;
+};
+function suitsLimits(at: Conditions, limits: Limits) {
+  if (limits.daylight && !at.daylight) return false;
+  if (limits.noOffshore && at.offshore) return false;
+  if (limits.waveMin !== undefined && (at.wave === null || at.wave < limits.waveMin)) return false;
+  if (limits.waveMax !== undefined && (at.wave === null || at.wave >= limits.waveMax)) return false;
+  if (limits.swellMin !== undefined && (at.swell === null || at.swell < limits.swellMin)) return false;
+  if (limits.swellMax !== undefined && (at.swell === null || at.swell >= limits.swellMax)) return false;
+  if (limits.swellPeriodMin !== undefined && (at.swellPeriod ?? 0) < limits.swellPeriodMin) return false;
+  if (limits.windWaveMax !== undefined && (at.windWave ?? 0) >= limits.windWaveMax) return false;
+  if (limits.windMin !== undefined && (at.wind === null || at.wind < limits.windMin)) return false;
+  if (limits.windMax !== undefined && (at.wind === null || at.wind > limits.windMax)) return false;
+  if (limits.gustMax !== undefined && (at.gust ?? 0) >= limits.gustMax) return false;
+  if (limits.periodMin !== undefined && (at.period ?? 0) < limits.periodMin) return false;
+  if (limits.waterMin !== undefined && (at.water ?? -99) < limits.waterMin) return false;
+  return true;
+}
+
+type Profile = {
+  key: string;
+  label: string;
+  hint: string;
+  limits: Limits;
+  /** What makes this window worth taking, in the terms the sport is judged in. */
+  why: (spell: Spell) => string;
+  /**
+   * The reading that decides which window is the pick. Rounded to the precision
+   * it is displayed at, so the badge can never claim one sea is flatter than
+   * another while both print 0.4 m.
+   */
+  pick: { of: (spell: Spell) => number | null; best: 'low' | 'high'; label: string };
+};
+
+/**
+ * The same forecast answers a different question for each thing you might do
+ * with it: 12 kt is a good afternoon on a yacht and the end of a paddle. Each
+ * profile shows its own thresholds on its chip, because they are guesses about
+ * someone else's sport and they should be easy to disagree with.
+ *
+ * The flat-water ceiling is 0.6 m rather than the 0.4 m first tried: measured
+ * against ten days of this coast, the sea never once dropped below 0.38 m and
+ * 0.4 m qualified nine daylight hours out of a hundred and thirty. A profile
+ * that can never light up is no more use than one that never goes out.
+ *
+ * Offshore wind rules out both board profiles regardless of everything else —
+ * it is the condition that takes a paddler out faster than they can come back —
+ * and both want daylight. A yacht is not bound by either.
+ */
+const LIMITS_KEY = 'weatherdeck:limits';
+type LimitOverrides = Record<string, Partial<Limits>>;
+
+/**
+ * Which numbers may be tuned, and what to call them.
+ *
+ * Only the ones already present in an activity's defaults are offered: a
+ * profile that never considered water temperature should not gain the idea
+ * because a field existed to type into.
+ */
+// The tunable half. daylight and noOffshore are structural rather than numeric
+// — whether a session needs light is not a dial — so they stay out.
+type NumericLimit = Exclude<keyof Limits, 'daylight' | 'noOffshore'>;
+const LIMIT_FIELDS: { key: NumericLimit; label: string; unit: string; step: number }[] = [
+  { key: 'windMin', label: 'Least wind', unit: 'kt', step: 1 },
+  { key: 'windMax', label: 'Most wind', unit: 'kt', step: 1 },
+  { key: 'gustMax', label: 'Most gust', unit: 'kt', step: 1 },
+  { key: 'waveMin', label: 'Least sea', unit: 'm', step: 0.1 },
+  { key: 'waveMax', label: 'Most sea', unit: 'm', step: 0.1 },
+  { key: 'swellMin', label: 'Least swell', unit: 'm', step: 0.1 },
+  { key: 'swellMax', label: 'Most swell', unit: 'm', step: 0.1 },
+  { key: 'swellPeriodMin', label: 'Least swell period', unit: 's', step: 1 },
+  { key: 'windWaveMax', label: 'Most chop', unit: 'm', step: 0.1 },
+  { key: 'periodMin', label: 'Least period', unit: 's', step: 1 },
+  { key: 'waterMin', label: 'Least water', unit: '°C', step: 1 },
+];
+
+function readLimitOverrides(): LimitOverrides {
+  const raw = readStorage(LIMITS_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw) as LimitOverrides;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch { return {}; }
+}
+
+/**
+ * The activities as they are actually judged: defaults with the user's own
+ * numbers laid over them.
+ *
+ * Tuning these used to mean editing the source, which made every adjustment a
+ * chance for the two halves of the app to disagree about the rules. There is
+ * still exactly one definition — it is just one the user can reach.
+ */
+function profilesWith(overrides: LimitOverrides): Profile[] {
+  return PROFILE_DEFAULTS.map(profile => {
+    const mine = overrides[profile.key];
+    if (!mine) return profile;
+    const limits = { ...profile.limits, ...mine };
+    return { ...profile, limits, hint: hintFor(limits) || profile.hint };
+  });
+}
+
+/** Rebuilt from the numbers, so an edited profile never describes itself wrongly. */
+function hintFor(limits: Limits) {
+  return clauses(
+    limits.windMin !== undefined && limits.windMax !== undefined ? `${limits.windMin}-${limits.windMax} kt`
+      : limits.windMax !== undefined ? `under ${limits.windMax} kt` : null,
+    limits.swellMin !== undefined && limits.swellMax !== undefined ? `swell ${limits.swellMin}-${limits.swellMax} m` : null,
+    limits.waveMax !== undefined ? `under ${limits.waveMax} m` : null,
+    limits.swellPeriodMin !== undefined ? `${limits.swellPeriodMin} s+` : null,
+    limits.waterMin !== undefined ? `${limits.waterMin}°C+` : null,
+  );
+}
+
+const PROFILE_DEFAULTS: Profile[] = [
+  {
+    key: 'sup',
+    label: 'SUP',
+    hint: 'under 10 kt · under 0.6 m',
+    limits: { daylight: true, noOffshore: true, windMax: 10, waveMax: 0.6 },
+    why: spell => clauses(spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`,
+      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
+    pick: { of: spell => shown(spell.wind, 0), best: 'low', label: 'lightest wind' },
+  },
+  {
+    key: 'sup-surf',
+    label: 'SUP surf',
+    hint: 'swell 0.6-1.5 m · 6 s+ · little chop',
+    /*
+     * Judged on the swell alone, with the local wind sea held down separately.
+     * The old rule used total height and total period, which cannot distinguish
+     * a rideable swell from the same amount of chop.
+     *
+     * Six seconds, not seven, because this is the Mediterranean: measured over
+     * ten days at Haifa the swell period ran a median of 5.1 s and never once
+     * passed 7.7. A 7 s gate fired on 11 hours out of 240 — the top few per
+     * cent of a short-fetch sea — where 6 s finds 26. Somewhere with real
+     * groundswell this would want raising.
+     */
+    limits: { daylight: true, noOffshore: true, swellMin: 0.6, swellMax: 1.51, swellPeriodMin: 6, windWaveMax: 0.4, windMax: 12 },
+    why: spell => clauses(spell.swell === null ? null : `swell ${spell.swell.toFixed(1)} m`,
+      spell.swellPeriod === null ? null : `${spell.swellPeriod.toFixed(0)} s`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.swellPeriod, 0), best: 'high', label: 'cleanest swell' },
+  },
+  {
+    key: 'sail',
+    label: 'Sailing',
+    hint: 'under 0.7 m · 6-14 kt',
+    /*
+     * The sea comes first here and the wind second: this is a day out with
+     * friends, some of whom have never sailed, and above about 0.7 m the boat
+     * stops being fun for them long before it stops being safe. So the window is
+     * picked on the flattest sea, not the best breeze.
+     *
+     * The ideal breeze is 8-12, but the band is 6-14 because on this coast the
+     * two wishes fight each other: measured over ten days, the hours with a sea
+     * under 0.7 m had a median wind of 4.4 kt and never once reached 10. Holding
+     * out for 8-12 on flat water found three hours in ten days and no run longer
+     * than one, so the profile would simply never have fired.
+     */
+    limits: { waveMax: 0.7, windMin: 6, windMax: 14, gustMax: 24 },
+    why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'flattest sea' },
+  },
+  {
+    key: 'dive',
+    label: 'Diving',
+    hint: 'under 0.5 m · under 12 kt',
+    limits: { daylight: true, waveMax: 0.5, windMax: 12 },
+    why: spell => clauses(spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`,
+      spell.wind === null ? null : `${spell.wind.toFixed(0)} kt`),
+    pick: { of: spell => shown(spell.wave, 1), best: 'low', label: 'calmest surface' },
+  },
+  {
+    key: 'swim',
+    label: 'Swimming',
+    hint: 'under 0.5 m · under 15 kt · 22°C+',
+    limits: { daylight: true, noOffshore: true, waveMax: 0.5, windMax: 15, waterMin: 22 },
+    why: spell => clauses(spell.water === null ? null : `${spell.water.toFixed(0)}°C water`,
+      spell.wave === null ? null : `sea ${spell.wave.toFixed(1)} m`),
+    pick: { of: spell => shown(spell.water, 0), best: 'high', label: 'warmest water' },
+  },
+];
+
+function conditionsAt(data: Forecast | null, index: number): Conditions {
+  return {
+    wind: reading(data, 'wind_speed_10m', index),
+    gust: reading(data, 'wind_gusts_10m', index),
+    wave: reading(data, 'wave_height', index),
+    period: reading(data, 'wave_period', index),
+    offshore: reading(data, OFFSHORE_KEY, index) === 1,
+    daylight: reading(data, 'is_day', index) === 1,
+    water: reading(data, 'sea_surface_temperature', index),
+    swell: reading(data, 'swell_wave_height', index),
+    swellPeriod: reading(data, 'swell_wave_period', index),
+    windWave: reading(data, 'wind_wave_height', index),
+  };
+}
+function withProfile(base: Forecast | null, profile: Profile | null): Forecast | null {
+  if (!base || !profile) return base;
+  const hourly: Record<string, Series | string[]> = { ...base.hourly };
+  hourly[MATCH_KEY] = base.hourly.time.map((_, index) =>
+    (suitsLimits(conditionsAt(base, index), profile.limits) ? 1 : null));
+  return { ...base, hourly: hourly as Hourly };
+}
+
+/**
+ * A day marked in advance — a trip already in the diary — and what the forecast
+ * has done to it since. The point is not "what is Friday like" but "is Friday
+ * still on", which is a different question and only answerable against what it
+ * looked like when the plan was made.
+ */
+type Session = {
+  id: string;
+  date: string;
+  /** "HH:MM" when an hour was named, null for "some time that day". */
+  time: string | null;
+  profile: string;
+  /** Carried so the Android watcher needs no table of its own. */
+  label: string;
+  limits: Limits;
+  setAt: number;
+  /** The forecast as it stood when this was written down. */
+  hours: number;
+  wind: number | null;
+  wave: number | null;
+  /**
+   * Whether any forecast reached this date when it was saved.
+   *
+   * A day booked months out has nothing to say yet. The watcher uses this to
+   * tell "we have never had a forecast for this" from "we have one and it is
+   * poor", so it can announce the first forecast when the day finally comes
+   * into range instead of quietly starting to track it.
+   */
+  hadForecast: boolean;
+};
+
+/** Open-Meteo timestamps are "2026-09-04T09:00" in the location's own clock. */
+function indexAtHour(data: Forecast | null, date: string, time: string | null) {
+  if (!time) return null;
+  const at = (data?.hourly?.time || []).indexOf(`${date}T${time.slice(0, 2)}:00`);
+  return at < 0 ? null : at;
+}
+
+/**
+ * Re-stamps a saved session with the activity's current thresholds.
+ *
+ * The interface always judges with the live `PROFILES` entry, while Android
+ * judges with the numbers frozen into the session when it was saved. Left
+ * alone those drift apart the moment a threshold is tuned — and they have been
+ * tuned — so a trip would show one verdict on screen and be alerted on by
+ * rules that no longer exist anywhere in the app. `PROFILES` stays the single
+ * definition; this is what carries a change out to sessions already written.
+ */
+function stamped(session: Session, profiles: Profile[]): Session {
+  const profile = profiles.find(entry => entry.key === session.profile);
+  const known = session.hadForecast ?? true;
+  if (!profile) return { ...session, hadForecast: known };
+  return { ...session, label: profile.label, limits: profile.limits, hadForecast: known };
+}
+
+/**
+ * The calendar date of a timestamp on this device's clock. toISOString() would
+ * answer in UTC, which east of Greenwich turns anything saved after midnight
+ * into the day before.
+ */
+function localDateOf(ms: number) {
+  const at = new Date(ms);
+  return `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(at.getDate()).padStart(2, '0')}`;
+}
+
+function readSessions(profiles: Profile[]): Session[] {
+  const raw = readStorage(SESSIONS_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Session[];
+      if (Array.isArray(parsed)) {
+        const live = parsed.filter(entry => entry && typeof entry.date === 'string')
+          .map(entry => stamped(entry, profiles));
+        // Written back, not just held in memory. Android reads storage, so
+        // re-stamping only the copy on screen would leave the notifications —
+        // the half that matters when the app is shut — running on the old
+        // rules, which is the bug this exists to close.
+        const rewritten = JSON.stringify(live);
+        if (rewritten !== raw) writeStorage(SESSIONS_KEY, rewritten);
+        return live;
+      }
+    } catch { /* unreadable; fall through to the legacy single plan */ }
+  }
+  // One planned day used to live under its own key. Carry it across rather
+  // than silently dropping a trip somebody had already written down.
+  const legacy = readStorage(LEGACY_PLAN_KEY);
+  if (!legacy) return [];
+  try {
+    const old = JSON.parse(legacy) as Partial<Session>;
+    if (!old || typeof old.date !== 'string') return [];
+    const profile = profiles.find(entry => entry.key === old.profile);
+    if (!profile) return [];
+    const carried: Session[] = [{
+      id: `legacy-${old.date}`,
+      date: old.date,
+      time: null,
+      profile: profile.key,
+      label: profile.label,
+      limits: profile.limits,
+      setAt: old.setAt ?? Date.now(),
+      hours: old.hours ?? 0,
+      wind: old.wind ?? null,
+      wave: old.wave ?? null,
+      hadForecast: true,
+    }];
+    // Written out straight away rather than left in memory: the Android watcher
+    // reads storage, so a migration that never lands there is a trip that
+    // silently stops being watched.
+    writeStorage(SESSIONS_KEY, JSON.stringify(carried));
+    return carried;
+  } catch { return []; }
+}
+
+/**
+ * How far apart the models were across a day, which is a different question
+ * from what they averaged to. A mean of 0.7 m built from 0.5 and 0.9 is not the
+ * same forecast as one built from 0.68 and 0.72, and for a day already in the
+ * diary the difference is whether to wait before cancelling.
+ */
+function agreementOn(data: Forecast | null, date: string) {
+  const indexes = indexesForDate(data, date);
+  const worst = (key: string) => {
+    const values = indexes.map(index => reading(data, key + SPREAD_SUFFIX, index)).filter((v): v is number => v !== null);
+    return values.length ? Math.max(...values) : null;
+  };
+  const wave = worst('wave_height');
+  const wind = worst('wind_speed_10m');
+  return {
+    wave, wind,
+    split: (wave !== null && wave >= SPLIT_WAVE_M) || (wind !== null && wind >= SPLIT_WIND_KT),
+  };
+}
+
+/**
+ * What a booked session looks like right now.
+ *
+ * When an hour was named the verdict is about that hour, because "seven good
+ * hours on Friday" is no comfort if none of them is the one you are on the
+ * water. The day's count stays alongside it as context — it is what tells you
+ * whether moving the trip a few hours would rescue it.
+ */
+function sessionReading(data: Forecast | null, session: { date: string; time: string | null }, profile: Profile) {
+  const indexes = indexesForDate(data, session.date);
+  const fits = indexes.filter(index => suitsLimits(conditionsAt(data, index), profile.limits));
+  const window = fits.length ? fits : indexes;
+  const mean = (key: string) => {
+    const values = window.map(index => reading(data, key, index)).filter((v): v is number => v !== null);
+    return values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null;
+  };
+  const at = indexAtHour(data, session.date, session.time);
+  return {
+    hours: fits.length,
+    wind: mean('wind_speed_10m'),
+    wave: mean('wave_height'),
+    // Null when no hour was named, or when the forecast does not reach it yet.
+    suitsHour: at === null ? null : suitsLimits(conditionsAt(data, at), profile.limits),
+    windAtHour: at === null ? null : reading(data, 'wind_speed_10m', at),
+    waveAtHour: at === null ? null : reading(data, 'wave_height', at),
+  };
+}
+
+/**
+ * The soonest session that has turned for the worse.
+ *
+ * Only one earns space on the forecast page; the rest live in their own tab. A
+ * card per trip on the front page would be exactly the clutter the tab exists
+ * to avoid.
+ */
+function firstTurned(sessions: Session[], data: Forecast | null, profiles: Profile[]) {
+  for (const entry of sessions) {
+    const chosen = profiles.find(item => item.key === entry.profile);
+    if (!chosen) continue;
+    const now = sessionReading(data, entry, chosen);
+    const state = sessionState(entry, now);
+    if (state === 'off' || state === 'worse') return { entry, now, state };
+  }
+  return null;
+}
+
+/**
+ * Which limit is actually doing the rejecting, and how far off it is.
+ *
+ * A day with no window is otherwise just blank, which tells you nothing and
+ * quietly makes the thresholds unfalsifiable — you cannot judge whether a rule
+ * is right for you if you never see it bite. Naming the binding constraint
+ * turns an empty day into a reason, and "wind to 18 kt" is also what tells you
+ * the rule is working rather than broken.
+ *
+ * The constraint reported is the one that fails most often across the day, not
+ * the first: an hour can fail several at once, and the one you keep hitting is
+ * the one worth knowing.
+ */
+function bindingReason(data: Forecast | null, date: string, profile: Profile) {
+  const indexes = indexesForDate(data, date);
+  if (!indexes.length) return null;
+  const limits = profile.limits;
+  const tally = new Map<string, { count: number; worst: number }>();
+  const note = (key: string, value: number | null) => {
+    const seen = tally.get(key) ?? { count: 0, worst: value ?? 0 };
+    tally.set(key, { count: seen.count + 1, worst: Math.max(seen.worst, value ?? 0) });
+  };
+
+  for (const index of indexes) {
+    const at = conditionsAt(data, index);
+    if (suitsLimits(at, limits)) return null; // Something fits; nothing is binding.
+    if (limits.daylight && !at.daylight) note('dark', null);
+    if (limits.noOffshore && at.offshore) note('offshore', null);
+    if (limits.windMax !== undefined && at.wind !== null && at.wind > limits.windMax) note('wind', at.wind);
+    if (limits.windMin !== undefined && at.wind !== null && at.wind < limits.windMin) note('calm', at.wind);
+    if (limits.gustMax !== undefined && (at.gust ?? 0) >= limits.gustMax) note('gust', at.gust);
+    if (limits.waveMax !== undefined && at.wave !== null && at.wave >= limits.waveMax) note('sea', at.wave);
+    if (limits.waveMin !== undefined && at.wave !== null && at.wave < limits.waveMin) note('flat', at.wave);
+    if (limits.swellMax !== undefined && at.swell !== null && at.swell >= limits.swellMax) note('swell', at.swell);
+    if (limits.swellMin !== undefined && at.swell !== null && at.swell < limits.swellMin) note('no swell', at.swell);
+    if (limits.swellPeriodMin !== undefined && (at.swellPeriod ?? 0) < limits.swellPeriodMin) note('short period', at.swellPeriod);
+    if (limits.windWaveMax !== undefined && (at.windWave ?? 0) >= limits.windWaveMax) note('chop', at.windWave);
+    if (limits.waterMin !== undefined && (at.water ?? -99) < limits.waterMin) note('cold water', at.water);
+  }
+
+  let top: { key: string; count: number; worst: number } | null = null;
+  for (const [key, seen] of tally) {
+    if (!top || seen.count > top.count) top = { key, ...seen };
+  }
+  if (!top) return null;
+  switch (top.key) {
+    case 'dark': return 'dark';
+    case 'offshore': return 'offshore wind';
+    case 'wind': return `wind to ${top.worst.toFixed(0)} kt`;
+    case 'calm': return 'too little wind';
+    case 'gust': return `gusts to ${top.worst.toFixed(0)} kt`;
+    case 'sea': return `sea to ${top.worst.toFixed(1)} m`;
+    case 'flat': return 'sea too flat';
+    case 'swell': return `swell to ${top.worst.toFixed(1)} m`;
+    case 'no swell': return 'not enough swell';
+    case 'short period': return 'swell too short';
+    case 'chop': return `chop to ${top.worst.toFixed(1)} m`;
+    case 'cold water': return 'water too cold';
+    default: return null;
+  }
+}
+
+/**
+ * The afternoon wind, named and timed.
+ *
+ * On this coast a westerly fills in most summer afternoons: measured over ten
+ * days at Haifa, nine of them rose 4 kt or more between morning and afternoon,
+ * arriving anywhere between 10:00 and 12:00. That the wind builds is not the
+ * news — the hour is. It is the difference between a flat-water paddle and
+ * carrying the board back up the beach.
+ *
+ * It is only called a sea breeze when the wind is actually coming off the
+ * water, which the coastline probe already knows. A land wind that strengthens
+ * in the afternoon is a different animal and gets a plainer name.
+ */
+const BREEZE_RISE_KT = 4;
+function breezeOn(data: Forecast | null, date: string, shore: ShoreMask | null) {
+  const indexes = indexesForDate(data, date);
+  if (!indexes.length) return null;
+  const hourAt = (index: number) => Number((data?.hourly?.time?.[index] || '').slice(11, 13));
+  const windIn = (from: number, to: number) => {
+    const values = indexes
+      .filter(index => hourAt(index) >= from && hourAt(index) <= to)
+      .map(index => reading(data, 'wind_speed_10m', index))
+      .filter((value): value is number => value !== null);
+    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  };
+
+  const morning = windIn(6, 10);
+  const afternoon = windIn(13, 18);
+  if (morning === null || afternoon === null) return null;
+  const rise = afternoon - morning;
+  if (rise < BREEZE_RISE_KT) return null;
+
+  // Halfway up the rise: the point it has clearly arrived rather than the
+  // first flicker, which moves around with every model tweak.
+  const gate = morning + rise / 2;
+  const onset = indexes.find(index => {
+    const hour = hourAt(index);
+    const wind = reading(data, 'wind_speed_10m', index);
+    return hour >= 10 && hour <= 18 && wind !== null && wind >= gate;
+  });
+  if (onset === undefined) return null;
+
+  const afternoonHours = indexes.filter(index => hourAt(index) >= 13 && hourAt(index) <= 18);
+  /*
+   * Asked of the coastline mask directly rather than read off OFFSHORE_KEY.
+   * That series encodes offshore as 1 and everything else as null, so an
+   * onshore hour and an hour with no answer look identical — which is exactly
+   * the case here, since a sea breeze has no offshore hours at all.
+   */
+  const bearings = afternoonHours
+    .map(index => reading(data, 'wind_direction_10m', index))
+    .filter((value): value is number => value !== null);
+  const offshoreHours = shore ? bearings.filter(bearing => isOffshore(shore, bearing)).length : 0;
+  const known = Boolean(shore?.water) && bearings.length > 0;
+  const peak = Math.max(...afternoonHours
+    .map(index => reading(data, 'wind_speed_10m', index))
+    .filter((value): value is number => value !== null), 0);
+
+  return {
+    at: formatHour(data?.hourly?.time?.[onset]),
+    peak,
+    seaBreeze: known && offshoreHours * 2 < bearings.length,
+  };
+}
+
+/**
+ * Why one particular hour fails, in the same words a whole day uses.
+ *
+ * A session pinned to an hour that says only "no longer suits" invites the
+ * reading that the app has it wrong — especially when the day chip above shows
+ * a wind the hour does not have. Naming the constraint settles it either way.
+ */
+function hourReason(data: Forecast | null, date: string, time: string, limits: Limits) {
+  const at = indexAtHour(data, date, time);
+  if (at === null) return null;
+  const now = conditionsAt(data, at);
+  if (suitsLimits(now, limits)) return null;
+  if (limits.daylight && !now.daylight) return 'dark';
+  if (limits.noOffshore && now.offshore) return 'offshore wind';
+  if (limits.windMin !== undefined && (now.wind === null || now.wind < limits.windMin)) {
+    return now.wind === null ? 'no wind reading' : `under the ${limits.windMin} kt minimum`;
+  }
+  if (limits.windMax !== undefined && now.wind !== null && now.wind > limits.windMax) return `over the ${limits.windMax} kt maximum`;
+  if (limits.gustMax !== undefined && (now.gust ?? 0) >= limits.gustMax) return `gusts over ${limits.gustMax} kt`;
+  if (limits.waveMax !== undefined && now.wave !== null && now.wave >= limits.waveMax) return `sea over ${limits.waveMax} m`;
+  if (limits.waveMin !== undefined && (now.wave === null || now.wave < limits.waveMin)) return 'sea too flat';
+  if (limits.swellMin !== undefined && (now.swell === null || now.swell < limits.swellMin)) return 'not enough swell';
+  if (limits.swellPeriodMin !== undefined && (now.swellPeriod ?? 0) < limits.swellPeriodMin) return 'swell too short';
+  if (limits.windWaveMax !== undefined && (now.windWave ?? 0) >= limits.windWaveMax) return 'too much chop';
+  if (limits.waterMin !== undefined && (now.water ?? -99) < limits.waterMin) return 'water too cold';
+  return null;
+}
+
+/** off | worse | better | holding, from the day count and the named hour. */
+function sessionState(session: Session, now: ReturnType<typeof sessionReading>) {
+  if (now.suitsHour === false || now.hours === 0) return 'off';
+  const drop = session.hours - now.hours;
+  return drop >= 2 ? 'worse' : drop <= -2 ? 'better' : 'holding';
+}
+
+const STATE_WORDS: Record<string, string> = {
+  off: 'No longer suits', worse: 'Getting worse', better: 'Improving', holding: 'Still on',
+};
+
+/**
+ * The verdict in words.
+ *
+ * A named hour that fails while the day around it is fine used to read "No
+ * longer suits · 7 h that day", which is a flat contradiction unless you
+ * already know the hour is the subject. It is also the most useful case there
+ * is — the trip is not off, it wants moving — so it says which of the two it
+ * means, and the hours become somewhere to move to rather than a rebuttal.
+ */
+function stateHeadline(session: Session, now: ReturnType<typeof sessionReading>, state: string) {
+  if (state === 'off' && now.suitsHour === false && now.hours > 0 && session.time) {
+    return { lead: `Not at ${session.time}`, aside: `${now.hours} h elsewhere that day` };
+  }
+  return {
+    lead: STATE_WORDS[state],
+    aside: now.hours > 0 ? `${now.hours} h that day` : null,
+  };
+}
+
+function meanOver(data: Forecast | null, key: string, from: number, to: number) {
+  const values: number[] = [];
+  for (let index = from; index <= to; index += 1) {
+    const value = reading(data, key, index);
+    if (value !== null) values.push(value);
+  }
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+}
+
+/**
+ * Unbroken runs of suitable hours from now on, longest first — the question
+ * actually being asked is not "is 14:00 any good" but "when can I go", and the
+ * answer is more useful with an alternative attached. Ties go to the earlier
+ * run, because a window today beats the same window on Thursday.
+ */
+function bestWindows(data: Forecast | null, from: number, count: number): Spell[] {
+  const times = data?.hourly?.time || [];
+  const runs: Spell[] = [];
+  let runStart = -1;
+  for (let index = from; index <= times.length; index += 1) {
+    const suitable = index < times.length && reading(data, MATCH_KEY, index) === 1;
+    if (suitable && runStart < 0) runStart = index;
+    if (!suitable && runStart >= 0) {
+      const end = index - 1;
+      const hours = index - runStart;
+      if (hours >= MIN_WINDOW_HOURS) {
+        runs.push({
+          start: runStart,
+          end,
+          hours,
+          wind: meanOver(data, 'wind_speed_10m', runStart, end),
+          wave: meanOver(data, 'wave_height', runStart, end),
+          period: meanOver(data, 'wave_period', runStart, end),
+          water: meanOver(data, 'sea_surface_temperature', runStart, end),
+          swell: meanOver(data, 'swell_wave_height', runStart, end),
+          swellPeriod: meanOver(data, 'swell_wave_period', runStart, end),
+        });
+      }
+      runStart = -1;
+    }
+  }
+  return runs.sort((a, b) => (b.hours - a.hours) || (a.start - b.start)).slice(0, count);
+}
+
 // One wind row per model, in place of a separate comparison screen.
 function withModelWinds(base: Forecast | null, forecasts: Partial<Record<ModelKey, Forecast>>) {
   return MODEL_KEYS.reduce<Forecast | null>(
@@ -303,6 +1208,49 @@ function buildConsensus(forecasts: Partial<Record<ModelKey, Forecast>>) {
   return { hourly: hourly as Hourly, utc_offset_seconds: axis.utc_offset_seconds, members: members.length };
 }
 
+/**
+ * Replaces the single-source wave series with the mean of the wave models, and
+ * records how far apart they were.
+ *
+ * The direction, water temperature and current stay as they were: those come
+ * from one model whatever we do, and pretending otherwise by leaving a stale
+ * spread beside them would be worse than having none.
+ */
+function withWaveConsensus(marine: Forecast | null, ensemble: Forecast | null): Forecast | null {
+  const times = marine?.hourly?.time;
+  if (!marine || !times?.length || !ensemble?.hourly?.time?.length) return marine;
+
+  const positions = new Map<string, number>();
+  ensemble.hourly.time.forEach((time, index) => positions.set(time, index));
+
+  const hourly: Record<string, Series | string[]> = { ...marine.hourly };
+  for (const key of WAVE_ENSEMBLE_KEYS) {
+    const members = Object.keys(ensemble.hourly).filter(name => name.startsWith(key + '_'));
+    if (!members.length) continue;
+    const mean: Series = [];
+    const count: Series = [];
+    const spread: Series = [];
+    for (const time of times) {
+      const at = positions.get(time);
+      const values: number[] = [];
+      if (at !== undefined) {
+        for (const name of members) {
+          const value = reading(ensemble, name, at);
+          if (value !== null) values.push(value);
+        }
+      }
+      if (!values.length) { mean.push(null); count.push(null); spread.push(null); continue; }
+      mean.push(values.reduce((sum, value) => sum + value, 0) / values.length);
+      count.push(values.length);
+      spread.push(values.length > 1 ? Math.max(...values) - Math.min(...values) : null);
+    }
+    hourly[key] = mean;
+    hourly[key + COUNT_SUFFIX] = count;
+    hourly[key + SPREAD_SUFFIX] = spread;
+  }
+  return { ...marine, hourly: hourly as Hourly };
+}
+
 // Kept out of the component so the memo around it stays a single call the
 // React Compiler can preserve.
 function findWindAlert(data: Forecast | null, from: number, threshold: number, key: string) {
@@ -312,6 +1260,85 @@ function findWindAlert(data: Forecast | null, from: number, threshold: number, k
     if (value !== null && value >= threshold) return { index, value, time: times[index] };
   }
   return null;
+}
+
+/** Great-circle offset, used to lay a ring of probe points around a spot. */
+function destination(latitude: number, longitude: number, bearing: number, km: number) {
+  const radius = 6371;
+  const angle = (bearing * Math.PI) / 180;
+  const lat = (latitude * Math.PI) / 180;
+  const lon = (longitude * Math.PI) / 180;
+  const distance = km / radius;
+  const nextLat = Math.asin(Math.sin(lat) * Math.cos(distance) + Math.cos(lat) * Math.sin(distance) * Math.cos(angle));
+  const nextLon = lon + Math.atan2(
+    Math.sin(angle) * Math.sin(distance) * Math.cos(lat),
+    Math.cos(distance) - Math.sin(lat) * Math.sin(nextLat),
+  );
+  return [(nextLat * 180) / Math.PI, (nextLon * 180) / Math.PI] as const;
+}
+function sectorOf(bearing: number) {
+  return Math.round((((bearing % 360) + 360) % 360) / (360 / SHORE_SECTORS)) % SHORE_SECTORS;
+}
+function shoreKey(location: Location) {
+  return `${SHORE_PREFIX}${location.latitude.toFixed(2)},${location.longitude.toFixed(2)}`;
+}
+
+/**
+ * Works out which way the open water lies, anywhere in the world, by asking
+ * Open-Meteo's elevation endpoint about a ring of points around the spot: sea
+ * reads as zero. The marine endpoint is no good for this — it snaps to a coarse
+ * grid and answers for inland points near the coast.
+ *
+ * The result is kept as a 16-sector water mask rather than reduced to a single
+ * bearing, because on a bay the water wraps around and one average angle
+ * flattens exactly the detail that matters.
+ */
+async function fetchShore(location: Location, signal: AbortSignal): Promise<ShoreMask | null> {
+  const latitudes: number[] = [];
+  const longitudes: number[] = [];
+  for (const km of SHORE_RINGS_KM) {
+    for (let sector = 0; sector < SHORE_SECTORS; sector += 1) {
+      const [lat, lon] = destination(location.latitude, location.longitude, (sector * 360) / SHORE_SECTORS, km);
+      latitudes.push(lat);
+      longitudes.push(lon);
+    }
+  }
+  const json = await fetchJson<{ elevation?: (number | null)[] }>(
+    `https://api.open-meteo.com/v1/elevation?latitude=${latitudes.map(v => v.toFixed(5)).join(',')}&longitude=${longitudes.map(v => v.toFixed(5)).join(',')}`,
+    signal,
+  );
+  if (!json?.elevation?.length) return null;
+  const sectors = new Array<boolean>(SHORE_SECTORS).fill(false);
+  json.elevation.forEach((value, index) => {
+    if (typeof value === 'number' && Number.isFinite(value) && value <= 1) sectors[index % SHORE_SECTORS] = true;
+  });
+  return { sectors, water: sectors.some(Boolean) };
+}
+
+/**
+ * wind_direction_10m is the direction the wind blows *from*. Offshore means it
+ * arrives over land and leaves over water — the case that carries a paddler out
+ * to sea faster than they can come back.
+ */
+function isOffshore(mask: ShoreMask | null, windFrom: number | null) {
+  if (!mask?.water || windFrom === null) return false;
+  const from = sectorOf(windFrom);
+  const before = (from + SHORE_SECTORS - 1) % SHORE_SECTORS;
+  const after = (from + 1) % SHORE_SECTORS;
+  // Requiring a neighbouring sector to agree keeps a wind sitting on a sector
+  // boundary from flipping the warning on and off between runs, and keeps a lone
+  // land cell in open water from raising one at all. A warning that cries wolf
+  // is worse than no warning.
+  const fromLand = !mask.sectors[from] && (!mask.sectors[before] || !mask.sectors[after]);
+  return fromLand && mask.sectors[sectorOf(windFrom + 180)];
+}
+function withOffshore(base: Forecast | null, mask: ShoreMask | null): Forecast | null {
+  if (!base) return null;
+  if (!mask?.water) return base;
+  const hourly: Record<string, Series | string[]> = { ...base.hourly };
+  hourly[OFFSHORE_KEY] = base.hourly.time.map((_, index) =>
+    (isOffshore(mask, reading(base, 'wind_direction_10m', index)) ? 1 : null));
+  return { ...base, hourly: hourly as Hourly };
 }
 
 async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T | null> {
@@ -345,6 +1372,17 @@ export default function WeatherApp() {
   const [selectedDay, setSelectedDay] = useState(0);
   const [compareModels, setCompareModels] = useState(false);
   const [now, setNow] = useState(0);
+  const [shore, setShore] = useState<ShoreMask | null>(null);
+  const [profileKey, setProfileKey] = useState<string>(() => readStorage(PROFILE_KEY) || '');
+  const [limitOverrides, setLimitOverrides] = useState<LimitOverrides>(readLimitOverrides);
+  const profiles = useMemo(() => profilesWith(limitOverrides), [limitOverrides]);
+  const [sessions, setSessions] = useState<Session[]>(() => readSessions(profilesWith(readLimitOverrides())));
+  const [planOpen, setPlanOpen] = useState(false);
+  const [tuning, setTuning] = useState('');
+  const searchGrip = useSheetDrag(() => setSearchOpen(false));
+  const planGrip = useSheetDrag(() => setPlanOpen(false));
+  const settingsGrip = useSheetDrag(() => setSettingsOpen(false));
+  const [draft, setDraft] = useState({ id: '', date: '', time: '', profile: '' });
 
   const searchInput = useRef<HTMLInputElement | null>(null);
   const request = useRef<AbortController | null>(null);
@@ -378,15 +1416,41 @@ export default function WeatherApp() {
     writeStorage(LOCATION_KEY, JSON.stringify(location));
   }, [location]);
 
+  // The coastline does not move, so this runs once per spot and is then cached.
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.resolve().then(async () => {
+      const cached = readStorage(shoreKey(location));
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached) as ShoreMask;
+          if (Array.isArray(parsed?.sectors) && parsed.sectors.length === SHORE_SECTORS) {
+            setShore(parsed);
+            return;
+          }
+        } catch { /* fall through and probe again */ }
+      }
+      const mask = await fetchShore(location, controller.signal);
+      if (controller.signal.aborted) return;
+      setShore(mask);
+      if (mask) writeStorage(shoreKey(location), JSON.stringify(mask));
+    });
+    return () => controller.abort();
+  }, [location]);
+
   const load = useCallback(async (signal: AbortSignal) => {
     setBusy(true);
     const base = `latitude=${location.latitude}&longitude=${location.longitude}&hourly=${WEATHER_VARS}&forecast_days=16&timezone=auto&wind_speed_unit=kn`;
-    const [models, nextMarine, nextExtended] = await Promise.all([
+    const [models, baseMarine, waveModels, nextExtended] = await Promise.all([
       Promise.all(MODEL_KEYS.map(key => fetchJson<Forecast>(`https://api.open-meteo.com/v1/forecast?${base}&models=${MODEL_IDS[key]}`, signal))),
       fetchJson<Forecast>(`https://marine-api.open-meteo.com/v1/marine?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${MARINE_VARS}&forecast_days=10&timezone=auto`, signal),
+      fetchJson<Forecast>(`https://marine-api.open-meteo.com/v1/marine?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${WAVE_ENSEMBLE_KEYS.join(',')}&forecast_days=10&timezone=auto&models=${WAVE_MODELS}`, signal),
       fetchJson<Forecast>(`https://ensemble-api.open-meteo.com/v1/ensemble?latitude=${location.latitude}&longitude=${location.longitude}&hourly=${LONG_RANGE_VARS}&forecast_days=21&timezone=auto&wind_speed_unit=kn&models=ncep_gefs05_ensemble_mean`, signal),
     ]);
     if (signal.aborted) return;
+
+    // Merged before it is cached, so the cache holds what the table reads.
+    const nextMarine = withWaveConsensus(baseMarine, waveModels);
 
     const next: Partial<Record<ModelKey, Forecast>> = {};
     MODEL_KEYS.forEach((key, i) => {
@@ -458,15 +1522,15 @@ export default function WeatherApp() {
   }, [query]);
 
   useEffect(() => {
-    if (!searchOpen && !settingsOpen) return undefined;
+    if (!searchOpen && !settingsOpen && !planOpen) return undefined;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { setSearchOpen(false); setSettingsOpen(false); }
+      if (event.key === 'Escape') { setSearchOpen(false); setSettingsOpen(false); setPlanOpen(false); }
     };
     window.addEventListener('keydown', onKey);
     const previous = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
     return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = previous; };
-  }, [searchOpen, settingsOpen]);
+  }, [searchOpen, settingsOpen, planOpen]);
 
   const consensus = useMemo(() => buildConsensus(forecasts), [forecasts]);
   const current = activeModel === 'MEAN' ? consensus : (forecasts[activeModel] || null);
@@ -477,6 +1541,7 @@ export default function WeatherApp() {
   const currentDir = reading(current, 'wind_direction_10m', nowIndex);
   const currentCloud = reading(current, 'cloud_cover', nowIndex);
   const currentRain = reading(current, 'precipitation', nowIndex);
+  const currentForce = beaufort(currentWind);
 
   const days = useMemo(() => {
     const times = extended?.hourly?.time?.length ? extended.hourly.time : (current?.hourly?.time || []);
@@ -507,14 +1572,55 @@ export default function WeatherApp() {
         : 'At least two models are needed for a mean'
       : current ? `${activeModel} operational model` : `${activeModel} returned no data`;
   const modelSubject = activeModel === 'MEAN' ? 'The model mean' : activeModel;
-  const dayHeading = selectedDate ? `${dayLabel(selectedDate).dow} ${dayLabel(selectedDate).date}` : 'Forecast';
+  // The badge beside this already names the model, so for a single operational
+  // run the source line would only say it twice and wrap on a phone doing it.
+  // A mean or an ensemble carries its spread, which the badge does not.
+  const sourceWorthSaying = usingExtended || activeModel === 'MEAN' || !current;
+  const leadNote = sourceWorthSaying ? `${confidenceAt(dayIndex).label} · ${sourceDetail}` : confidenceAt(dayIndex).label;
 
+  const profile = profiles.find(entry => entry.key === profileKey) ?? null;
+  const continuous = useMemo(() => stitch(current, extended), [current, extended]);
   const tableData = useMemo(() => {
-    const withSea = withSeries(forecastData, marine, MARINE_KEYS);
+    const withSea = withSeries(withSeries(continuous, marine, MARINE_KEYS), consensus ?? undefined, WIND_AGREEMENT_KEYS);
     // The ensemble carries no daylight flag; borrow it from any operational model.
     const lit = hasSeries(withSea, 'is_day') ? withSea : withSeries(withSea, current ?? undefined, ['is_day']);
-    return compareModels ? withModelWinds(lit, forecasts) : lit;
-  }, [forecastData, marine, current, forecasts, compareModels]);
+    const flagged = withProfile(withOffshore(carryDaylight(lit), shore), profile);
+    return compareModels ? withModelWinds(flagged, forecasts) : flagged;
+  }, [continuous, marine, consensus, current, forecasts, compareModels, shore, profile]);
+
+  // Days already gone stop being watched, but are not deleted from under you.
+  const todayHere = localDateAt(tableData) || days[0] || '';
+  const upcoming = useMemo(
+    () => sessions.filter(entry => !todayHere || entry.date >= todayHere),
+    [sessions, todayHere],
+  );
+  const needsAttention = useMemo(() => firstTurned(upcoming, tableData, profiles), [upcoming, tableData, profiles]);
+  const breeze = useMemo(
+    () => (selectedDate ? breezeOn(tableData, selectedDate, shore) : null),
+    [tableData, selectedDate, shore],
+  );
+
+  // Every three-hourly slot of every day, in order — the table is one scroll
+  // through the whole range rather than a view onto a chosen day.
+  const tableColumns = useMemo(() => {
+    const startAt = nowIndexFor(tableData);
+    const columns: { index: number; date: string }[] = [];
+    for (const day of days) {
+      for (const index of daySlots(tableData, day, startAt)) columns.push({ index, date: day });
+    }
+    return columns;
+  }, [tableData, days]);
+  const ensembleDays = useMemo(
+    () => new Set(days.filter(day => !coversDate(current, day))),
+    [days, current],
+  );
+  // No profile means no match series, so both of these fall out at zero without
+  // needing a branch — which also keeps the memos ones the compiler can hold on to.
+  const spells = useMemo(() => bestWindows(tableData, nowIndexFor(tableData), 2), [tableData]);
+  const matchesPerDay = useMemo(
+    () => days.map(day => indexesForDate(tableData, day).filter(index => reading(tableData, MATCH_KEY, index) === 1).length),
+    [days, tableData],
+  );
   const tableRows = useMemo(() => [
     ...WEATHER_ROWS,
     ...(activeModel === 'MEAN' && !usingExtended ? AGREEMENT_ROWS : []),
@@ -533,6 +1639,10 @@ export default function WeatherApp() {
     return {
       low: temperatures.length ? Math.min(...temperatures) : null,
       high: temperatures.length ? Math.max(...temperatures) : null,
+      // A range, like the temperature above it. It used to show the day's peak
+      // alone, which reads as "the wind on Friday" — so a morning of 4 kt looked
+      // like 9, and an activity that wants 6 kt looked wrongly judged.
+      windLow: winds.length ? Math.min(...winds) : null,
       wind: winds.length ? Math.max(...winds) : null,
     };
   }), [days, current, extended]);
@@ -551,13 +1661,7 @@ export default function WeatherApp() {
   const hasRainChance = hasSeries(forecastData, 'precipitation_probability');
   const hasCape = hasSeries(forecastData, 'cape');
 
-  const confidence = dayIndex < 5
-    ? { label: 'High confidence', className: 'high', detail: 'Best operational guidance' }
-    : dayIndex < 10
-      ? { label: 'Medium confidence', className: 'medium', detail: 'Model differences are increasing' }
-      : dayIndex < 16
-        ? { label: 'Low confidence', className: 'low', detail: 'Use as planning guidance only' }
-        : { label: 'Very low confidence', className: 'very-low', detail: 'Experimental long-range trend' };
+  const confidence = confidenceAt(dayIndex);
 
   const alertKey = hasSeries(current, 'wind_gusts_10m') ? 'wind_gusts_10m' : 'wind_speed_10m';
   const windAlertHit = useMemo(
@@ -602,6 +1706,101 @@ export default function WeatherApp() {
   function selectLocation(next: Location) {
     setLocation(next); setSelectedDay(0); setSearchOpen(false); setSearch(''); setResults(NO_RESULTS); setGpsError('');
     writeStorage(LOCATION_KEY, JSON.stringify(next));
+  }
+  /**
+   * Keeps the day strip pointing at whatever the table is showing. Guarded so a
+   * scroll that stays within the same day does not re-render the page.
+   */
+  function followTableDate(date: string) {
+    const at = days.indexOf(date);
+    if (at >= 0 && at !== dayIndex) setSelectedDay(at);
+  }
+
+  function openNewSession() {
+    setDraft({ id: '', date: selectedDate || days[0] || '', time: '', profile: profileKey || profiles[0].key });
+    setPlanOpen(true);
+  }
+
+  function editSession(session: Session) {
+    setDraft({ id: session.id, date: session.date, time: session.time || '', profile: session.profile });
+    setPlanOpen(true);
+  }
+
+  function keepSessions(next: Session[]) {
+    const ordered = next.map(entry => stamped(entry, profiles)).sort((a, b) => a.date.localeCompare(b.date) || (a.time || '').localeCompare(b.time || ''));
+    setSessions(ordered);
+    writeStorage(SESSIONS_KEY, JSON.stringify(ordered));
+  }
+
+  /**
+   * Saving records the forecast as it stands, which is what every later "still
+   * on?" is measured against. Editing an existing one re-records it on purpose:
+   * the plan changed, so the old comparison no longer describes anything.
+   */
+  function saveDraft() {
+    const chosen = profiles.find(entry => entry.key === draft.profile);
+    if (!chosen || !draft.date) return;
+    const time = draft.time || null;
+    const now = sessionReading(tableData, { date: draft.date, time }, chosen);
+    const entry: Session = {
+      id: draft.id || `${draft.date}-${chosen.key}-${Date.now().toString(36)}`,
+      date: draft.date,
+      time,
+      profile: chosen.key,
+      label: chosen.label,
+      limits: chosen.limits,
+      setAt: Date.now(),
+      hours: now.hours,
+      wind: now.wind,
+      wave: now.wave,
+      hadForecast: coversDate(tableData, draft.date),
+    };
+    keepSessions([...sessions.filter(item => item.id !== entry.id), entry]);
+    setPlanOpen(false);
+  }
+
+  /**
+   * Writes one threshold. Sessions are re-stamped in the same breath, so an
+   * edited rule reaches the trips already in the diary — and the storage they
+   * are watched from — rather than only the next one added.
+   */
+  function setLimit(profileKey: string, field: NumericLimit, value: number | null) {
+    const next: LimitOverrides = { ...limitOverrides };
+    const mine = { ...(next[profileKey] ?? {}) };
+    if (value === null || Number.isNaN(value)) delete mine[field];
+    else mine[field] = value;
+    if (Object.keys(mine).length) next[profileKey] = mine;
+    else delete next[profileKey];
+    setLimitOverrides(next);
+    writeStorage(LIMITS_KEY, JSON.stringify(next));
+    const restamped = sessions.map(entry => stamped(entry, profilesWith(next)));
+    setSessions(restamped);
+    writeStorage(SESSIONS_KEY, JSON.stringify(restamped));
+  }
+
+  function resetLimits(profileKey: string) {
+    const next: LimitOverrides = { ...limitOverrides };
+    delete next[profileKey];
+    setLimitOverrides(next);
+    writeStorage(LIMITS_KEY, JSON.stringify(next));
+    const restamped = sessions.map(entry => stamped(entry, profilesWith(next)));
+    setSessions(restamped);
+    writeStorage(SESSIONS_KEY, JSON.stringify(restamped));
+  }
+
+  function removeSession(id: string) {
+    keepSessions(sessions.filter(item => item.id !== id));
+  }
+
+  function chooseProfile(key: string) {
+    const next = profileKey === key ? '' : key;
+    setProfileKey(next);
+    writeStorage(PROFILE_KEY, next);
+  }
+  function jumpToWindow(spell: Spell) {
+    const date = tableData?.hourly?.time?.[spell.start]?.slice(0, 10);
+    const target = date ? days.indexOf(date) : -1;
+    if (target >= 0) setSelectedDay(target);
   }
   function changeWindAlert(value: number) {
     setWindAlert(value);
@@ -669,6 +1868,7 @@ export default function WeatherApp() {
             <div>
               <strong>{fixed(currentWind, 1)} kt</strong>
               <small>{cardinal(currentDir)} · Gusts {fixed(reading(current, 'wind_gusts_10m', nowIndex), 1)} kt</small>
+              {currentForce && <small className="beaufort">F{currentForce.force} · {currentForce.name}</small>}
             </div>
           </div>
         </section>
@@ -698,31 +1898,138 @@ export default function WeatherApp() {
             const label = dayLabel(day);
             const stats = dayStats[index];
             return (
-              <button type="button" className={dayIndex === index ? 'active' : ''} aria-pressed={dayIndex === index} key={day} onClick={() => setSelectedDay(index)}>
+              <button
+                type="button"
+                className={`lead-${confidenceAt(index).className}${dayIndex === index ? ' active' : ''}`}
+                aria-pressed={dayIndex === index}
+                title={`${confidenceAt(index).label} — ${confidenceAt(index).detail}`}
+                key={day}
+                onClick={() => setSelectedDay(index)}
+              >
                 <b>{label.dow}</b>
                 <span>{label.date}</span>
                 <i>{stats.low === null || stats.high === null ? '—' : `${Math.round(stats.low)}–${Math.round(stats.high)}°`}</i>
-                <em>{stats.wind === null ? `D+${index}` : `${Math.round(stats.wind)} kt`}</em>
+                <em>{stats.wind === null
+                  ? `D+${index}`
+                  : stats.windLow === null || Math.round(stats.windLow) === Math.round(stats.wind)
+                    ? `${Math.round(stats.wind)} kt`
+                    : `${Math.round(stats.windLow)}–${Math.round(stats.wind)} kt`}</em>
+                {profile && matchesPerDay[index] > 0 && <u>{matchesPerDay[index]} h</u>}
               </button>
             );
           })}
         </section>
 
-        <section className={`confidence-bar ${confidence.className}`}>
-          <div><b>{confidence.label}</b><span>{confidence.detail}</span></div>
-          <small>{sourceDetail}</small>
+        {breeze && (
+          <p className="breeze-note">
+            {breeze.seaBreeze ? 'Sea breeze' : 'Wind'} builds from about {breeze.at}, to {breeze.peak.toFixed(0)} kt
+          </p>
+        )}
+
+        {needsAttention && (
+          <button type="button" className={`plan-card ${needsAttention.state}`} onClick={() => setActiveView('Plans')}>
+            <p className="plan-head">
+              {needsAttention.entry.label.toUpperCase()} · {dayLabel(needsAttention.entry.date).dow} {dayLabel(needsAttention.entry.date).date}
+              {needsAttention.entry.time ? ` · ${needsAttention.entry.time}` : ''}
+            </p>
+            <strong>
+              {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).lead}
+              {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).aside && (
+                <span> · {stateHeadline(needsAttention.entry, needsAttention.now, needsAttention.state).aside}</span>
+              )}
+            </strong>
+            <small>
+              {clauses(
+                needsAttention.entry.time ? `at ${needsAttention.entry.time}` : null,
+                (needsAttention.entry.time ? needsAttention.now.waveAtHour : needsAttention.now.wave) === null
+                  ? null
+                  : `sea ${(needsAttention.entry.time ? needsAttention.now.waveAtHour : needsAttention.now.wave)!.toFixed(1)} m`,
+                (needsAttention.entry.time ? needsAttention.now.windAtHour : needsAttention.now.wind) === null
+                  ? null
+                  : `${(needsAttention.entry.time ? needsAttention.now.windAtHour : needsAttention.now.wind)!.toFixed(0)} kt`,
+                needsAttention.state === 'off'
+                  ? (needsAttention.entry.time
+                    ? hourReason(tableData, needsAttention.entry.date, needsAttention.entry.time,
+                      profiles.find(e => e.key === needsAttention.entry.profile)!.limits)
+                    : bindingReason(tableData, needsAttention.entry.date,
+                      profiles.find(e => e.key === needsAttention.entry.profile)!))
+                  : null,
+              ) || 'no readings yet'}
+            </small>
+          </button>
+        )}
+
+        <section className="profile-strip" aria-label="Activity">
+          {profiles.map(entry => (
+            <button
+              type="button"
+              key={entry.key}
+              className={profileKey === entry.key ? 'active' : ''}
+              aria-pressed={profileKey === entry.key}
+              onClick={() => chooseProfile(entry.key)}
+            >
+              <b>{entry.label}</b><small>{entry.hint}</small>
+            </button>
+          ))}
         </section>
 
-        <WindGraph data={tableData} indexes={weatherDayIndexes} nowIndex={dataNowIndex} threshold={windAlert} />
+        {profile && (spells.length
+          ? (
+            <div className="window-list">
+              <p className="window-caption">Best {profile.label.toLowerCase()} windows</p>
+              {spells.map((spell, position) => {
+                const date = tableData?.hourly?.time?.[spell.start]?.slice(0, 10);
+                const rival = spells[1 - position];
+                const mine = profile.pick.of(spell);
+                const theirs = rival ? profile.pick.of(rival) : null;
+                const isPick = mine !== null && theirs !== null
+                  && (profile.pick.best === 'low' ? mine < theirs : mine > theirs);
+                return (
+                  <button type="button" className="window-banner" key={spell.start} onClick={() => jumpToWindow(spell)}>
+                    <strong>
+                      {date ? `${dayLabel(date).dow} ` : ''}
+                      {formatHour(tableData?.hourly?.time?.[spell.start])}–{formatHour(tableData?.hourly?.time?.[spell.end])}
+                    </strong>
+                    <b>{spell.hours} h</b>
+                    <small>{profile.why(spell)}</small>
+                    {isPick && spells.length > 1 && <i>{profile.pick.label}</i>}
+                  </button>
+                );
+              })}
+            </div>
+          )
+          : (() => {
+            const blocked = days
+              .map(day => ({ day, why: bindingReason(tableData, day, profile) }))
+              .filter((entry): entry is { day: string; why: string } => entry.why !== null)
+              .slice(0, 3);
+            return (
+              <p className="notice">
+                No {profile.label} window of {MIN_WINDOW_HOURS} hours or more in the next {days.length} days.
+                {blocked.length > 0 && (
+                  <span className="notice-why">
+                    {blocked.map(entry => `${dayLabel(entry.day).dow} ${entry.why}`).join(' · ')}
+                  </span>
+                )}
+              </p>
+            );
+          })()
+        )}
 
         <ReadingTable
           data={tableData}
-          indexes={forecastIndexes}
+          columns={tableColumns}
+          ensembleDays={ensembleDays}
+          focusDate={selectedDate}
+          nowIndex={nowIndexFor(tableData)}
           rows={tableRows}
-          eyebrow="DETAILED FORECAST"
-          title={`${dayHeading} · every 3 hours`}
-          badge={usingExtended ? 'ENSEMBLE' : activeModel === 'MEAN' ? 'MODEL MEAN' : 'HOURLY'}
-          subject={usingExtended ? 'The ensemble mean' : modelSubject}
+          onVisibleDate={followTableDate}
+          eyebrow={leadNote}
+          eyebrowTone={confidence.className}
+          eyebrowTitle={confidence.detail}
+          title={`${days.length} days · every 3 hours`}
+          badge={activeModel === 'MEAN' ? 'MODEL MEAN' : modelSubject}
+          subject={modelSubject}
           footnote={{ group: 'SEA', text: 'Sea rows come from the wave model and do not change with the selected weather model.' }}
           action={
             <button type="button" className={`table-toggle ${compareModels ? 'on' : ''}`} aria-pressed={compareModels} onClick={() => setCompareModels(!compareModels)}>
@@ -752,13 +2059,26 @@ export default function WeatherApp() {
         </section>
       </>}
 
+      {activeView === 'Plans' && (
+        <PlansView
+          sessions={upcoming}
+          past={sessions.filter(entry => !upcoming.includes(entry))}
+          data={tableData}
+          profiles={profiles}
+          onAdd={openNewSession}
+          onEdit={editSession}
+          onRemove={removeSession}
+        />
+      )}
       {activeView === 'Map' && <MapView location={location} />}
       {activeView === 'Saved' && <SavedView favorites={favorites} onSelect={selectLocation} onGps={requestGps} onRemove={removeFavorite} gpsError={gpsError} />}
 
       <nav className="bottom-nav" aria-label="Main navigation">
-        {(['Forecast', 'Map', 'Saved'] as ViewKey[]).map(view => (
+        {(['Forecast', 'Plans', 'Map', 'Saved'] as ViewKey[]).map(view => (
           <button type="button" key={view} className={activeView === view ? 'selected' : ''} aria-current={activeView === view ? 'page' : undefined} onClick={() => setActiveView(view)}>
-            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Map' ? '⌖' : '☆'}</span>{view}
+            <span aria-hidden="true">{view === 'Forecast' ? '☼' : view === 'Plans' ? '⚑' : view === 'Map' ? '⌖' : '☆'}</span>
+            {view}
+            {view === 'Plans' && upcoming.length > 0 && <i className="tab-count">{upcoming.length}</i>}
           </button>
         ))}
       </nav>
@@ -767,8 +2087,8 @@ export default function WeatherApp() {
         <div className="sheet-backdrop">
           <button type="button" className="sheet-dismiss" aria-label="Close location picker" onClick={() => setSearchOpen(false)} />
           <section className="sheet search-sheet" role="dialog" aria-modal="true" aria-label="Choose location">
-            <div className="sheet-handle" />
-            <div className="sheet-title"><h2>Choose location</h2><button type="button" onClick={() => setSearchOpen(false)} aria-label="Close">×</button></div>
+            <div className="sheet-handle" {...searchGrip} />
+            <div className="sheet-title" {...searchGrip}><h2>Choose location</h2><button type="button" onClick={() => setSearchOpen(false)} aria-label="Close">×</button></div>
             <div className="search-box">
               <span aria-hidden="true">⌕</span>
               <input ref={searchInput} value={search} onChange={event => setSearch(event.target.value)} placeholder="Search city or spot" aria-label="Search city or spot" />
@@ -788,12 +2108,90 @@ export default function WeatherApp() {
         </div>
       )}
 
+      {planOpen && (
+        <div className="sheet-backdrop">
+          <button type="button" className="sheet-dismiss" aria-label="Close planner" onClick={() => setPlanOpen(false)} />
+          <section className="sheet plan-sheet" role="dialog" aria-modal="true" aria-label="Plan a session">
+            <div className="sheet-handle" {...planGrip} />
+            <div className="sheet-title" {...planGrip}>
+              <h2>{draft.id ? 'Edit session' : 'Plan a session'}</h2>
+              <button type="button" onClick={() => setPlanOpen(false)} aria-label="Close">×</button>
+            </div>
+
+            <label className="field" htmlFor="plan-date">
+              <span>Date</span>
+              <input
+                id="plan-date"
+                type="date"
+                value={draft.date}
+                min={todayHere || undefined}
+                onChange={event => setDraft({ ...draft, date: event.target.value })}
+              />
+            </label>
+
+            <label className="field" htmlFor="plan-time">
+              <span>Time <em>optional</em></span>
+              <input
+                id="plan-time"
+                type="time"
+                step={3600}
+                value={draft.time}
+                onChange={event => setDraft({ ...draft, time: event.target.value })}
+              />
+            </label>
+            <p className="field-note">
+              Name an hour and the verdict is about that hour. Leave it empty and it is about the day.
+            </p>
+
+            <div className="field">
+              <span>Activity</span>
+              <div className="plan-profiles">
+                {profiles.map(entry => (
+                  <button
+                    type="button"
+                    key={entry.key}
+                    className={draft.profile === entry.key ? 'on' : ''}
+                    onClick={() => setDraft({ ...draft, profile: entry.key })}
+                  >
+                    <b>{entry.label}</b><small>{entry.hint}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {draft.date && draft.profile && (() => {
+              const chosen = profiles.find(entry => entry.key === draft.profile);
+              if (!chosen) return null;
+              const preview = sessionReading(tableData, { date: draft.date, time: draft.time || null }, chosen);
+              return (
+                <p className="field-note preview">
+                  {coversDate(tableData, draft.date)
+                    ? clauses(
+                      draft.time
+                        ? `${draft.time} ${preview.suitsHour ? 'suits' : 'does not suit'}`
+                        : null,
+                      `${preview.hours} h suitable that day`,
+                      preview.wave === null ? null : `sea ${preview.wave.toFixed(1)} m`,
+                      preview.wind === null ? null : `${preview.wind.toFixed(0)} kt`,
+                    )
+                    : 'No forecast reaches this day yet. Save it anyway — you will be told when the first one arrives.'}
+                </p>
+              );
+            })()}
+
+            <button type="button" className="primary-action" onClick={saveDraft} disabled={!draft.date || !draft.profile}>
+              {draft.id ? 'Save changes' : 'Add session'}
+            </button>
+          </section>
+        </div>
+      )}
+
       {settingsOpen && (
         <div className="sheet-backdrop">
           <button type="button" className="sheet-dismiss" aria-label="Close preferences" onClick={() => setSettingsOpen(false)} />
           <section className="sheet settings-sheet" role="dialog" aria-modal="true" aria-label="Preferences">
-            <div className="sheet-handle" />
-            <div className="sheet-title"><h2>Preferences</h2><button type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">×</button></div>
+            <div className="sheet-handle" {...settingsGrip} />
+            <div className="sheet-title" {...settingsGrip}><h2>Preferences</h2><button type="button" onClick={() => setSettingsOpen(false)} aria-label="Close">×</button></div>
             <label className="setting-row" htmlFor="wind-alert">
               <span><b>Wind alert</b><small>Banner when the next 24 h exceed this speed</small></span>
               <strong>{windAlert} kt</strong>
@@ -804,6 +2202,85 @@ export default function WeatherApp() {
               : notifyState === 'granted'
                 ? <p className="notice">System notifications are enabled. Alerts also appear in-app.</p>
                 : <button type="button" className="primary-action" onClick={enableAlerts} disabled={notifyState === 'denied'}>{notifyState === 'denied' ? 'Notifications blocked in browser settings' : 'Enable browser notifications'}</button>}
+            <div className="limits-box">
+              <p className="setting-head">Activity thresholds</p>
+              <p className="field-note">
+                What counts as suitable, in your numbers. Changing one updates the sessions already planned.
+              </p>
+              <div className="limit-tabs">
+                {profiles.map(entry => (
+                  <button
+                    type="button"
+                    key={entry.key}
+                    className={tuning === entry.key ? 'on' : ''}
+                    onClick={() => setTuning(tuning === entry.key ? '' : entry.key)}
+                  >
+                    {entry.label}
+                    {limitOverrides[entry.key] && <i aria-label="edited">·</i>}
+                  </button>
+                ))}
+              </div>
+              {tuning && (() => {
+                const live = profiles.find(entry => entry.key === tuning);
+                const base = PROFILE_DEFAULTS.find(entry => entry.key === tuning);
+                if (!live || !base) return null;
+                // Only the constraints this activity already has: a field to type
+                // into is an invitation to invent a rule that was never intended.
+                const fields = LIMIT_FIELDS.filter(field => base.limits[field.key] !== undefined);
+                return (
+                  <div className="limit-fields">
+                    {fields.map(field => {
+                      const value = live.limits[field.key] as number | undefined;
+                      const fallback = base.limits[field.key] as number;
+                      return (
+                        <label className="limit-row" key={String(field.key)} htmlFor={`limit-${field.key}`}>
+                          <span>{field.label}<em>{field.unit}</em></span>
+                          <span className="limit-stepper">
+                            <button
+                              type="button"
+                              aria-label={`Lower ${field.label}`}
+                              onClick={() => setLimit(tuning, field.key,
+                                Number((((value ?? fallback) - field.step)).toFixed(2)))}
+                            >−</button>
+                            <input
+                              id={`limit-${field.key}`}
+                              type="number"
+                              inputMode="decimal"
+                              step={field.step}
+                              value={value ?? ''}
+                              placeholder={String(fallback)}
+                              /* Selects on focus: typing a new number should not
+                                 first require clearing the old one by hand. */
+                              onFocus={event => event.target.select()}
+                              onChange={event => setLimit(tuning, field.key,
+                                event.target.value === '' ? null : Number(event.target.value))}
+                            />
+                            <button
+                              type="button"
+                              aria-label={`Raise ${field.label}`}
+                              onClick={() => setLimit(tuning, field.key,
+                                Number((((value ?? fallback) + field.step)).toFixed(2)))}
+                            >+</button>
+                          </span>
+                          {value !== undefined && value !== fallback && <b>was {fallback}</b>}
+                        </label>
+                      );
+                    })}
+                    {limitOverrides[tuning] && (
+                      <button type="button" className="reset-limits" onClick={() => resetLimits(tuning)}>
+                        Reset {live.label} to defaults
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="about-box">
+              <b>Build</b>
+              <p className="build-stamp">{__BUILD__}</p>
+            </div>
+
             <div className="about-box">
               <b>Data sources</b>
               <p>ECMWF, NOAA GFS, DWD ICON and ECMWF AIFS via Open-Meteo. Marine forecasts combine public wave and ocean models. Not every model publishes every variable — missing readings are shown as “—” and never estimated.</p>
@@ -817,31 +2294,206 @@ export default function WeatherApp() {
 
 /* ---------- views ---------- */
 
-type Row = { key: string; group: string; label: string; unit: string; render: (data: Forecast | null, index: number) => ReactNode };
+/**
+ * `tier` is what makes the table scannable. Everything used to carry the same
+ * visual weight, so there was nowhere for the eye to land. Now the readings a
+ * session turns on are set loud, the supporting ones normal, and the reference
+ * ones recede — the numbers are all still there, they just stop competing.
+ */
+type Tier = 'lead' | 'normal' | 'reference';
+/** The columns either side, so a spectrum row can blend across cell edges. */
+type Neighbours = { before: number | null; after: number | null };
+type Row = { key: string; group: string; label: string; unit: string; tier: Tier; render: (data: Forecast | null, index: number, near: Neighbours) => ReactNode };
 
 const EMPTY_CELL = <span className="table-empty">—</span>;
 function numberCell(data: Forecast | null, key: string, index: number, format: (value: number) => ReactNode) {
   const value = reading(data, key, index);
   return value === null ? EMPTY_CELL : format(value);
 }
-function windCell(data: Forecast | null, key: string, index: number) {
+/**
+ * A spectrum cell: the fill runs edge to edge, and each half fades towards the
+ * neighbouring column's colour, so a row reads as one continuous gradient across
+ * the day rather than a line of separate swatches. This is the single change
+ * that makes a wall of numbers scannable.
+ */
+function spectrumCell(
+  data: Forecast | null,
+  key: string,
+  index: number,
+  near: Neighbours,
+  tone: (value: number) => { fill: string; ink: string },
+  format: (value: number) => string,
+) {
   return numberCell(data, key, index, value => {
-    const tone = windTone(value);
-    return <span className="scale-chip" style={{ background: tone.fill, color: tone.ink }}>{value.toFixed(1)}</span>;
+    const here = tone(value);
+    const edge = (at: number | null) => {
+      const neighbour = at === null ? null : reading(data, key, at);
+      return neighbour === null ? here.fill : mixHex(here.fill, tone(neighbour).fill);
+    };
+    return (
+      <span
+        className="scale-fill"
+        style={{
+          background: `linear-gradient(90deg, ${edge(near.before)} 0%, ${here.fill} 45%, ${here.fill} 55%, ${edge(near.after)} 100%)`,
+          color: here.ink,
+        }}
+      >
+        {format(value)}
+      </span>
+    );
   });
+}
+/**
+ * Metres of sea, as a height inside the cell.
+ *
+ * 1.5 m rather than the 2 m the colour ramp tops out at, because the drawing
+ * has to spend the cell where the sea actually lives: measured over ten days at
+ * Haifa the total wave ran 0.38 to 1.36 m with a median of 0.52, so a 2 m scale
+ * left two thirds of every cell empty and every hour looking alike. Anything
+ * above 1.5 m draws full and is deep red by then anyway — past that point the
+ * colour carries the extreme and the shape carries the ordinary range, which is
+ * the half you actually read.
+ */
+const WAVE_DRAWN_MAX = 1.5;
+function waterLine(value: number) {
+  const share = Math.max(0, Math.min(1, value / WAVE_DRAWN_MAX));
+  return 88 - share * 76;
+}
+
+/**
+ * The wave row draws the sea it is describing.
+ *
+ * This replaces the panel that used to sit above the table. A graph of one
+ * chosen day answered "what does today look like" and the table answers "which
+ * hour, across two weeks" — so the graph was a second, smaller, worse copy of
+ * the row directly below it, and it cost a screenful.
+ *
+ * The surface is carried through the cell edges rather than drawn per cell: the
+ * left edge meets the previous column's height and the right edge meets the
+ * next one's, so the row is one continuous sea across the whole scroll instead
+ * of a line of separate tiles. Colour still carries severity, exactly as the
+ * wind row above; the shape carries size. Reading them together is what tells a
+ * building sea from a fading one at a glance.
+ */
+function waveCell(data: Forecast | null, key: string, index: number, near: Neighbours) {
+  return numberCell(data, key, index, value => {
+    const tone = waveTone(value);
+    const here = waterLine(value);
+    const edge = (at: number | null) => {
+      const neighbour = at === null ? null : reading(data, key, at);
+      return neighbour === null ? here : (here + waterLine(neighbour)) / 2;
+    };
+    const left = edge(near.before);
+    const right = edge(near.after);
+    // Two cubics through the three heights: the control points sit level with
+    // the points they leave, which is what keeps the joins smooth rather than
+    // kinked at every cell edge.
+    const path = `M0,${left.toFixed(1)} C25,${left.toFixed(1)} 25,${here.toFixed(1)} 50,${here.toFixed(1)}`
+      + ` C75,${here.toFixed(1)} 75,${right.toFixed(1)} 100,${right.toFixed(1)}`;
+    return (
+      <span className="wave-cell">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <path d={`${path} L100,100 L0,100 Z`} fill={tone.fill} opacity="0.5" />
+          <path d={path} fill="none" stroke={tone.fill} strokeWidth="2.5" vectorEffect="non-scaling-stroke" />
+        </svg>
+        <b>{value.toFixed(1)}</b>
+      </span>
+    );
+  });
+}
+
+function windCell(data: Forecast | null, key: string, index: number, near: Neighbours) {
+  return spectrumCell(data, key, index, near, windTone, value => value.toFixed(1));
 }
 function arrowCell(data: Forecast | null, key: string, index: number) {
   return numberCell(data, key, index, value => <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>);
 }
+/**
+ * The day's shape for one row, beside its label. Reading eight numbers to work
+ * out whether something is rising or falling is the slow part of a table; this
+ * answers it before the numbers are read at all.
+ *
+ * Scaled to the row's own range, so it shows shape, not magnitude — the numbers
+ * carry magnitude.
+ */
+function Sparkline({ data, seriesKey, indexes, tier }: { data: Forecast | null; seriesKey: string; indexes: number[]; tier: Tier }) {
+  const values = indexes.map(index => reading(data, seriesKey, index));
+  const known = values.filter((value): value is number => value !== null);
+  if (known.length < 3) return null;
+  const low = Math.min(...known);
+  const span = Math.max(...known) - low || 1;
+  const points = values
+    .map((value, position) => (value === null
+      ? null
+      : `${(1 + (position / Math.max(1, values.length - 1)) * 38).toFixed(1)},${(12.5 - ((value - low) / span) * 11).toFixed(1)}`))
+    .filter((value): value is string => value !== null);
+  if (points.length < 3) return null;
+  return (
+    <svg className={`sparkline ${tier}`} viewBox="0 0 40 14" aria-hidden="true" focusable="false">
+      <polyline points={points.join(' ')} fill="none" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function anyOffshore(data: Forecast | null, indexes: number[]) {
+  return indexes.some(index => reading(data, OFFSHORE_KEY, index) === 1);
+}
 
 const WEATHER_ROWS: Row[] = [
-  { key: 'wind_direction_10m', group: 'AIR', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wind_direction_10m', index) },
-  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', render: (data, index) => windCell(data, 'wind_speed_10m', index) },
-  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', render: (data, index) => windCell(data, 'wind_gusts_10m', index) },
-  { key: 'temperature_2m', group: 'AIR', label: 'Temperature', unit: '°C', render: (data, index) => numberCell(data, 'temperature_2m', index, value => <span className="temp-pill">{Math.round(value)}°</span>) },
-  { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
-  { key: 'precipitation', group: 'AIR', label: 'Rain', unit: 'mm', render: (data, index) => numberCell(data, 'precipitation', index, value => value.toFixed(1)) },
-  { key: 'cloud_cover', group: 'AIR', label: 'Clouds', unit: '%', render: (data, index) => numberCell(data, 'cloud_cover', index, value => Math.round(value)) },
+  {
+    key: 'wind_direction_10m',
+    group: 'AIR',
+    label: 'Direction',
+    unit: '',
+    tier: 'lead',
+    render: (data, index) => numberCell(data, 'wind_direction_10m', index, value => (
+      <span className={`dir-cell${reading(data, OFFSHORE_KEY, index) === 1 ? ' offshore' : ''}`}>
+        <span className="table-arrow" style={{ transform: `rotate(${value}deg)` }}>↑</span>
+      </span>
+    )),
+  },
+  { key: 'wind_speed_10m', group: 'AIR', label: 'Wind', unit: 'kt', tier: 'lead', render: (data, index, near) => windCell(data, 'wind_speed_10m', index, near) },
+  { key: 'wind_gusts_10m', group: 'AIR', label: 'Gusts', unit: 'kt', tier: 'lead', render: (data, index, near) => windCell(data, 'wind_gusts_10m', index, near) },
+  {
+    key: 'temperature_2m',
+    group: 'AIR',
+    label: 'Temperature',
+    unit: '°C',
+    tier: 'normal',
+    render: (data, index, near) => spectrumCell(data, 'temperature_2m', index, near, tempTone, value => `${Math.round(value)}°`),
+  },
+  { key: 'pressure_msl', group: 'AIR', label: 'Pressure', unit: 'hPa', tier: 'reference', render: (data, index) => numberCell(data, 'pressure_msl', index, value => Math.round(value)) },
+  {
+    key: 'precipitation',
+    group: 'AIR',
+    label: 'Rain',
+    unit: 'mm',
+    tier: 'normal',
+    /*
+     * Eight cells reading "0.0" is not information, it is filler that the eye
+     * skips — which is why this row may as well not have been here on a dry day.
+     * A dry hour is now an empty drop and nothing else; a wet one fills in and
+     * states the amount, with the tint scaled to how much.
+     */
+    render: (data, index) => numberCell(data, 'precipitation', index, value => (value < 0.05
+      ? <span className="rain-cell dry" aria-label="no rain">◌</span>
+      : (
+        <span className="rain-cell wet" style={{ '--wet': `${Math.min(100, value * 45).toFixed(0)}%` } as CSSProperties}>
+          <b>{value.toFixed(1)}</b>
+        </span>
+      ))),
+  },
+  {
+    key: 'cloud_cover',
+    group: 'AIR',
+    label: 'Clouds',
+    unit: '%',
+    tier: 'reference',
+    // A filled disc rather than a percentage: nobody reads "38" as a sky.
+    render: (data, index) => numberCell(data, 'cloud_cover', index, value => (
+      <span className="cloud-dial" style={{ '--cover': `${Math.round(value)}%` } as CSSProperties} aria-label={`${Math.round(value)} percent cloud`} />
+    )),
+  },
 ];
 
 // Shown only for the mean: a mean is worth no more than the agreement behind
@@ -852,6 +2504,7 @@ const AGREEMENT_ROWS: Row[] = [
     group: 'MODEL AGREEMENT',
     label: 'Wind spread',
     unit: 'kt',
+    tier: 'normal',
     render: (data, index) => numberCell(data, 'wind_speed_10m' + SPREAD_SUFFIX, index,
       value => <span className={`agreement ${value < 3 ? 'good' : value < 6 ? 'fair' : 'poor'}`}>{value.toFixed(1)}</span>),
   },
@@ -860,20 +2513,54 @@ const AGREEMENT_ROWS: Row[] = [
     group: 'MODEL AGREEMENT',
     label: 'Models used',
     unit: `of ${MODEL_KEYS.length}`,
+    tier: 'reference',
     render: (data, index) => numberCell(data, 'wind_speed_10m' + COUNT_SUFFIX, index, value => String(value)),
   },
 ];
 
 
 const MARINE_ROWS: Row[] = [
-  { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', render: (data, index) => arrowCell(data, 'wave_direction', index) },
-  { key: 'wave_height', group: 'SEA', label: 'Waves', unit: 'm', render: (data, index) => numberCell(data, 'wave_height', index, value => value.toFixed(1)) },
-  { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
-  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', render: (data, index) => numberCell(data, 'swell_wave_height', index, value => value.toFixed(1)) },
-  { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
-  { key: 'wind_wave_height', group: 'SEA', label: 'Wind wave', unit: 'm', render: (data, index) => numberCell(data, 'wind_wave_height', index, value => value.toFixed(1)) },
-  { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
-  { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
+  { key: 'wave_direction', group: 'SEA', label: 'Direction', unit: '', tier: 'normal', render: (data, index) => arrowCell(data, 'wave_direction', index) },
+  {
+    key: 'wave_height',
+    group: 'SEA',
+    label: 'Waves',
+    unit: 'm',
+    tier: 'lead',
+    render: (data, index, near) => waveCell(data, 'wave_height', index, near),
+  },
+  { key: 'wave_period', group: 'SEA', label: 'Period', unit: 's', tier: 'lead', render: (data, index) => numberCell(data, 'wave_period', index, value => value.toFixed(0)) },
+  { key: 'sea_surface_temperature', group: 'SEA', label: 'Water', unit: '°C', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'sea_surface_temperature', index, near, tempTone, value => `${Math.round(value)}°`) },
+  { key: 'swell_wave_height', group: 'SEA', label: 'Swell', unit: 'm', tier: 'normal', render: (data, index, near) => spectrumCell(data, 'swell_wave_height', index, near, waveTone, value => value.toFixed(1)) },
+  { key: 'swell_wave_period', group: 'SEA', label: 'Swell period', unit: 's', tier: 'normal', render: (data, index) => numberCell(data, 'swell_wave_period', index, value => value.toFixed(0)) },
+  {
+    key: 'wind_wave_height',
+    group: 'SEA',
+    label: 'Wind wave',
+    unit: 'm',
+    tier: 'normal',
+    // The same ramp as the swell row above it on purpose: the two are only
+    // worth reading against each other, and they cannot be compared by eye if
+    // one is painted and the other is a bare number. A green swell over a red
+    // wind wave is chop; the other way round is a session.
+    render: (data, index, near) => spectrumCell(data, 'wind_wave_height', index, near, waveTone, value => value.toFixed(1)),
+  },
+  {
+    key: 'wave_height' + SPREAD_SUFFIX,
+    group: 'SEA',
+    label: 'Model split',
+    unit: 'm',
+    tier: 'reference',
+    /*
+     * How far apart the wave models were at that hour. Until this release the
+     * sea came from one model and this row could not have existed; the number
+     * shown above is now their mean, and this says how much of an agreement
+     * that mean represents.
+     */
+    render: (data, index) => numberCell(data, 'wave_height' + SPREAD_SUFFIX, index, value => value.toFixed(2)),
+  },
+  { key: 'ocean_current_velocity', group: 'SEA', label: 'Current', unit: 'km/h', tier: 'reference', render: (data, index) => numberCell(data, 'ocean_current_velocity', index, value => value.toFixed(2)) },
+  { key: 'sea_level_height_msl', group: 'SEA', label: 'Sea level', unit: 'm', tier: 'reference', render: (data, index) => numberCell(data, 'sea_level_height_msl', index, value => value.toFixed(2)) },
 ];
 
 const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
@@ -881,212 +2568,204 @@ const MODEL_WIND_ROWS: Row[] = MODEL_KEYS.map(model => ({
   group: 'MODELS · WIND',
   label: model,
   unit: MODEL_META[model].provider,
-  render: (data, index) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index),
+  tier: 'normal',
+  render: (data, index, near) => windCell(data, `${MODEL_ROW_PREFIX}${model}:wind_speed_10m`, index, near),
 }));
 
-const GRAPH = { width: 320, height: 128, left: 28, right: 8, top: 12, bottom: 20 };
+const COLUMN_WIDTH = 62;
 
-/**
- * Wind over the whole selected day at full hourly resolution — the shape the
- * three-hourly table cannot show: when the wind fills in, how long it holds and
- * when it dies. Sustained wind is the filled band; gusts are the envelope above
- * it. The table below is the accessible equivalent of this chart.
- */
-function WindGraph({ data, indexes, nowIndex, threshold }: {
+function ReadingTable({ data, columns, ensembleDays, focusDate, nowIndex, rows: candidates, badge, eyebrow, eyebrowTone, eyebrowTitle, title, subject, footnote, action, onVisibleDate }: {
   data: Forecast | null;
-  indexes: number[];
+  columns: { index: number; date: string }[];
+  ensembleDays: Set<string>;
+  focusDate?: string;
   nowIndex: number;
-  threshold: number;
-}) {
-  const [hover, setHover] = useState<number | null>(null);
-
-  const points = indexes
-    .map(index => ({
-      index,
-      time: data?.hourly?.time?.[index],
-      wind: reading(data, 'wind_speed_10m', index),
-      gust: reading(data, 'wind_gusts_10m', index),
-      night: reading(data, 'is_day', index) === 0,
-    }))
-    .filter(point => point.wind !== null);
-  if (points.length < 2) return null;
-
-  const peak = Math.max(...points.map(point => Math.max(point.wind ?? 0, point.gust ?? 0)), threshold);
-  const ceiling = Math.max(10, Math.ceil(peak / 5) * 5);
-  const plotWidth = GRAPH.width - GRAPH.left - GRAPH.right;
-  const plotHeight = GRAPH.height - GRAPH.top - GRAPH.bottom;
-  const x = (position: number) => GRAPH.left + (points.length === 1 ? plotWidth / 2 : (position / (points.length - 1)) * plotWidth);
-  const y = (value: number) => GRAPH.top + plotHeight - (value / ceiling) * plotHeight;
-
-  const line = (pick: (point: typeof points[number]) => number | null) => points
-    .map((point, position) => {
-      const value = pick(point);
-      return value === null ? null : `${position === 0 ? 'M' : 'L'}${x(position).toFixed(1)},${y(value).toFixed(1)}`;
-    })
-    .filter(Boolean)
-    .join(' ');
-  const windArea = `${line(point => point.wind)} L${x(points.length - 1).toFixed(1)},${y(0).toFixed(1)} L${x(0).toFixed(1)},${y(0).toFixed(1)} Z`;
-
-  const strongest = points.reduce((best, point) => ((point.wind ?? 0) > (best.wind ?? 0) ? point : best), points[0]);
-  const strongestAt = points.indexOf(strongest);
-  const strongestGust = Math.max(...points.map(point => point.gust ?? 0));
-  // Nudge the peak label clear of the alert line when they land on each other.
-  const peakLabelY = strongest.wind === null
-    ? 0
-    : y(strongest.wind) - (Math.abs(y(strongest.wind) - y(threshold)) < 11 ? 14 : 6);
-  const gridlines = [0, ceiling / 2, ceiling];
-  const active = hover === null ? null : points[hover];
-
-  const onPointer = (event: React.PointerEvent<SVGSVGElement>) => {
-    const box = event.currentTarget.getBoundingClientRect();
-    const ratio = ((event.clientX - box.left) / box.width) * GRAPH.width;
-    const position = Math.round(((ratio - GRAPH.left) / plotWidth) * (points.length - 1));
-    setHover(Math.max(0, Math.min(points.length - 1, position)));
-  };
-
-  return (
-    <section className="graph-card">
-      <div className="section-title">
-        <div>
-          <p className="eyebrow">WIND THROUGH THE DAY</p>
-          <h2>{fixed(strongest.wind, 0)} kt{strongestGust > 0 ? ` · gusts ${strongestGust.toFixed(0)}` : ''}</h2>
-        </div>
-        <div className="graph-legend">
-          <span><i style={{ background: SERIES_WIND }} />Wind</span>
-          <span><i style={{ background: SERIES_GUST }} />Gusts</span>
-        </div>
-      </div>
-      <div className="graph-frame">
-        <svg
-          viewBox={`0 0 ${GRAPH.width} ${GRAPH.height}`}
-          role="img"
-          aria-label={`Wind through the day, peaking at ${fixed(strongest.wind, 0)} knots with gusts to ${strongestGust.toFixed(0)}. The table below carries the same readings.`}
-          onPointerMove={onPointer}
-          onPointerLeave={() => setHover(null)}
-        >
-          {points.map((point, position) => point.night && (
-            <rect
-              key={point.index}
-              x={position === 0 ? GRAPH.left : (x(position) + x(position - 1)) / 2}
-              y={GRAPH.top}
-              width={Math.max(1, plotWidth / (points.length - 1))}
-              height={plotHeight}
-              fill="#0a1c25"
-            />
-          ))}
-          {gridlines.map(value => (
-            <g key={value}>
-              <line x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(value)} y2={y(value)} stroke="#24414d" strokeWidth="1" />
-              <text x={GRAPH.left - 5} y={y(value) + 3} textAnchor="end" fill="#89a0aa" fontSize="7">{Math.round(value)}</text>
-            </g>
-          ))}
-          <line
-            x1={GRAPH.left} x2={GRAPH.width - GRAPH.right} y1={y(threshold)} y2={y(threshold)}
-            stroke="#89a0aa" strokeWidth="1" strokeDasharray="3 3"
-          />
-          <text x={GRAPH.width - GRAPH.right} y={y(threshold) - 3} textAnchor="end" fill="#89a0aa" fontSize="7">alert {threshold}</text>
-
-          <path d={windArea} fill={SERIES_WIND} fillOpacity="0.22" />
-          <path d={line(point => point.gust)} fill="none" stroke={SERIES_GUST} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-          <path d={line(point => point.wind)} fill="none" stroke={SERIES_WIND} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-
-          {points.map((point, position) => (position % 6 === 0 || position === points.length - 1) && (
-            <text key={point.index} x={x(position)} y={GRAPH.height - 6} textAnchor="middle" fill="#89a0aa" fontSize="7">
-              {formatHour(point.time)}
-            </text>
-          ))}
-          {strongest.wind !== null && (
-            <text x={x(strongestAt)} y={peakLabelY} textAnchor="middle" fill="#edf6f7" fontSize="8" fontWeight="700">
-              {strongest.wind.toFixed(0)}
-            </text>
-          )}
-          {indexes.includes(nowIndex) && (
-            <line
-              x1={x(points.findIndex(point => point.index === nowIndex))}
-              x2={x(points.findIndex(point => point.index === nowIndex))}
-              y1={GRAPH.top} y2={GRAPH.top + plotHeight}
-              stroke="#38e3b1" strokeWidth="1"
-            />
-          )}
-          {active && (
-            <line x1={x(hover ?? 0)} x2={x(hover ?? 0)} y1={GRAPH.top} y2={GRAPH.top + plotHeight} stroke="#edf6f7" strokeWidth="1" strokeOpacity="0.5" />
-          )}
-        </svg>
-        {active && (
-          <p className="graph-tooltip">
-            <b>{formatHour(active.time)}</b> {fixed(active.wind, 1)} kt
-            {active.gust !== null && <> · gusts {active.gust.toFixed(1)}</>}
-          </p>
-        )}
-      </div>
-    </section>
-  );
-}
-
-// The column count travels to the grid as a custom property rather than a full
-// grid-template-columns value, so the responsive rules in the stylesheet still
-// win over the inline style.
-function ReadingTable({ data, indexes, rows: candidates, badge, eyebrow, title, subject, footnote, action }: {
-  data: Forecast | null;
-  indexes: number[];
   rows: Row[];
   badge: string;
   eyebrow: string;
+  eyebrowTone?: string;
+  eyebrowTitle?: string;
   title: string;
   subject: string;
   footnote?: { group: string; text: string };
   action?: ReactNode;
+  onVisibleDate?: (date: string) => void;
 }) {
-  // Columns after dark are shaded, so a run of hours reads as a night at a
-  // glance instead of having to be worked out from the clock.
+  const header = useRef<HTMLDivElement | null>(null);
+  const headerGrid = useRef<HTMLDivElement | null>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const indexes = useMemo(() => columns.map(column => column.index), [columns]);
+
+  /**
+   * The dates and hours live in their own strip, scrolled sideways in step with
+   * the body below it.
+   *
+   * They used to share one box that scrolled both ways, which is what let the
+   * header stay put — and it also swallowed the page. A finger anywhere over the
+   * table drove the table's own scroll instead of the page, so you could not get
+   * back up, and reaching the table before it filled the screen left you reading
+   * a quarter-height grid. With the vertical scroll gone the page behaves
+   * normally and the strip pins to the top of the viewport instead.
+   */
+  /**
+   * Only the body scrolls; the header strip is shifted to match.
+   *
+   * Two scrollers syncing each other's scrollLeft is the obvious approach and a
+   * poor one: each write fires the other's scroll event, so it needs a guard
+   * flag, and a dropped frame leaves the two out of step. One scroller and a
+   * transform cannot desynchronise, and it never re-renders — the transform is
+   * written straight to the node.
+   */
+  const followHeader = (left: number) => {
+    const grid = headerGrid.current;
+    if (grid) grid.style.transform = `translateX(${-left}px)`;
+  };
+  /**
+   * The day chips follow the scroll, not just the other way round.
+   *
+   * Tapping a date jumps the table to it, but scrolling on from there left the
+   * old chip lit — the strip claimed you were on Friday while the columns under
+   * your thumb were Sunday's. Whatever is actually in view is what is marked.
+   *
+   * The label column is pinned over the first 104px, so the leading column not
+   * hidden behind it is the one the reader is on.
+   */
+  const onBodyScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const left = event.currentTarget.scrollLeft;
+    followHeader(left);
+    if (!onVisibleDate) return;
+    const column = columns[Math.min(columns.length - 1, Math.ceil(left / COLUMN_WIDTH))];
+    if (column) onVisibleDate(column.date);
+  };
+
+  /**
+   * Measured from the boxes themselves rather than offsetLeft: the day headers
+   * are sticky, so their offsetParent is not the scroll box and offsetLeft
+   * answers a different question than the one being asked.
+   *
+   * The jump is instant. `behavior: 'smooth'` was silently doing nothing here,
+   * which is also what it does for anyone who has asked for reduced motion —
+   * a jump that only sometimes happens is worse than one that always does.
+   */
+  useEffect(() => {
+    const box = scroller.current;
+    if (!box || !focusDate) return;
+    const target = header.current?.querySelector<HTMLElement>(`[data-day-start="${focusDate}"]`);
+    if (!target) return;
+    const label = box.querySelector<HTMLElement>('.table-label');
+    const gutter = label ? label.getBoundingClientRect().width : 0;
+    const delta = target.getBoundingClientRect().left - box.getBoundingClientRect().left - gutter;
+    const left = Math.max(0, box.scrollLeft + delta);
+    box.scrollLeft = left;
+    followHeader(left);
+  }, [focusDate]);
+
   const night = new Set(indexes.filter(index => reading(data, 'is_day', index) === 0));
-  // Availability is judged on the hours actually on screen, so a variable the
-  // model stops publishing part-way through the range drops out of that day
-  // instead of rendering a row of dashes.
   const rows = candidates.filter(row => hasVisibleData(data, row.key, indexes));
   const missing = candidates.filter(row => !rows.includes(row));
-  // A whole group that drops out is named once ("no sea data") rather than
-  // listed row by row.
   const missingCopy = [...new Set(missing.map(row => row.group))].map(group => {
     const absent = missing.filter(row => row.group === group);
     return absent.length === candidates.filter(row => row.group === group).length
       ? `no ${group.toLowerCase()} data`
       : `no ${absent.map(row => row.label.toLowerCase()).join(', ')}`;
   });
+
+  // Runs of columns belonging to the same day, for the spanning date header.
+  const spans: { date: string; from: number; count: number }[] = [];
+  columns.forEach((column, position) => {
+    const last = spans[spans.length - 1];
+    if (last && last.date === column.date) last.count += 1;
+    else spans.push({ date: column.date, from: position, count: 1 });
+  });
+
+  const current = indexes.includes(nowIndex)
+    ? nowIndex
+    : indexes.reduce<number | null>((best, index) => (
+      index <= nowIndex && (best === null || index > best) ? index : best), null);
+
   return (
     <section className="forecast-card">
       <div className="section-title">
-        <div><p className="eyebrow">{eyebrow}</p><h2>{title}</h2></div>
+        <div><p className={`eyebrow${eyebrowTone ? ` lead-${eyebrowTone}` : ''}`} title={eyebrowTitle}>{eyebrow}</p><h2>{title}</h2></div>
         <div className="section-actions">{action}<span className="live-badge">{badge}</span></div>
       </div>
-      {rows.length && indexes.length ? (
-        <div className="weather-table" style={{ '--cols': indexes.length } as CSSProperties}>
-          <div className="table-head table-label"><b>LOCAL TIME</b></div>
-          {indexes.map(index => (
-            <div className={`table-head${night.has(index) ? ' night' : ''}`} key={index}>
-              {formatHour(data?.hourly?.time?.[index])}
-              {night.has(index) && <em aria-label="after dark">☾</em>}
-            </div>
-          ))}
-          {rows.map((row, position) => (
-            <Fragment key={row.key}>
-              {row.group !== rows[position - 1]?.group && (
-                <div className="table-group"><span>{row.group}</span></div>
-              )}
-              <div className="table-row">
-                <div className="table-label"><b>{row.label}</b><small>{row.unit}</small></div>
-                {indexes.map(index => (
-                  <div className={`table-cell${night.has(index) ? ' night' : ''}`} key={index}>{row.render(data, index)}</div>
-                ))}
+      {rows.length && columns.length ? (
+        <>
+        <div className="table-head-strip" ref={header}>
+          <div className="table-grid" ref={headerGrid} style={{ '--cols': columns.length } as CSSProperties}>
+            <div className="table-day table-label corner"><b>DATE</b></div>
+            {spans.map(span => {
+              const label = dayLabel(span.date);
+              return (
+                <div
+                  className={`table-day${span.from === 0 ? '' : ' day-start'}`}
+                  data-day-start={span.date}
+                  style={{ gridColumn: `span ${span.count}` }}
+                  key={span.date}
+                >
+                  {/* Pinned inside its own span, so the date stays put while you
+                      scroll through that day's hours rather than sliding away. */}
+                  <span className="day-name">
+                    <b>{label.dow}</b> {label.date}
+                    {ensembleDays.has(span.date) && <i title="NOAA GEFS ensemble mean">ENS</i>}
+                  </span>
+                </div>
+              );
+            })}
+
+            <div className="table-head table-label corner"><b>LOCAL TIME</b></div>
+            {columns.map((column, position) => (
+              <div
+                className={`table-head${night.has(column.index) ? ' night' : ''}${column.index === current ? ' current' : ''}${reading(data, MATCH_KEY, column.index) === 1 ? ' suits' : ''}${spans.some(span => span.from === position && position > 0) ? ' day-start' : ''}`}
+                key={column.index}
+              >
+                {formatHour(data?.hourly?.time?.[column.index])}
+                {night.has(column.index) && <em aria-label="after dark">☾</em>}
               </div>
-            </Fragment>
-          ))}
+            ))}
+          </div>
         </div>
+        <div className="table-body" ref={scroller} onScroll={onBodyScroll}>
+          <div className="table-grid" style={{ '--cols': columns.length } as CSSProperties}>
+            {rows.map((row, rowPosition) => (
+              <Fragment key={row.key}>
+                {row.group !== rows[rowPosition - 1]?.group && <>
+                  <div className="table-group table-label"><span>{row.group}</span></div>
+                  {columns.map(column => <div className="table-group-fill" key={column.index} />)}
+                </>}
+                <div className="table-row">
+                  <div className={`table-label ${row.tier}`}>
+                    <span className="label-text"><b>{row.label}</b><small>{row.unit}</small></span>
+                    <Sparkline data={data} seriesKey={row.key} indexes={indexes} tier={row.tier} />
+                  </div>
+                  {columns.map((column, position) => (
+                    <div
+                      className={`table-cell ${row.tier}${night.has(column.index) ? ' night' : ''}${column.index === current ? ' current' : ''}${spans.some(span => span.from === position && position > 0) ? ' day-start' : ''}`}
+                      key={column.index}
+                    >
+                      {row.render(data, column.index, {
+                        before: position > 0 ? columns[position - 1].index : null,
+                        after: position < columns.length - 1 ? columns[position + 1].index : null,
+                      })}
+                    </div>
+                  ))}
+                </div>
+              </Fragment>
+            ))}
+          </div>
+        </div>
+        </>
       ) : (
-        <p className="notice">{subject} publishes no data for this day. Choose another day or source.</p>
+        <p className="notice">{subject} publishes no data for this range.</p>
       )}
       {rows.length > 0 && missingCopy.length > 0 && (
-        <p className="data-note">For this day: {missingCopy.join('; ')}.</p>
+        <p className="data-note">Across this range: {missingCopy.join('; ')}.</p>
+      )}
+      {rows.length > 0 && anyOffshore(data, indexes) && (
+        <p className="data-note offshore-note">
+          <span className="offshore-dot" aria-hidden="true" />
+          Offshore — the wind is blowing from the shore out to sea.
+        </p>
       )}
       {footnote && rows.some(row => row.group === footnote.group) && (
         <p className="data-note">{footnote.text}</p>
@@ -1111,6 +2790,143 @@ function MapView({ location }: { location: Location }) {
         <div className="map-pin"><span aria-hidden="true">⌖</span><b>{location.name}</b></div>
       </div>
       <p className="data-note">Map data © OpenStreetMap contributors. Weather overlays are not part of this build.</p>
+    </section>
+  );
+}
+
+/**
+ * The trips already in the diary, and what the forecast has done to them.
+ *
+ * Alerts are posted by the Android side, which is the only part of this that
+ * runs when the app is closed. It writes its permission state back into
+ * storage so this page can say what is actually true rather than assuring you
+ * of notifications that were refused months ago and never arrive.
+ */
+function PlansView({ sessions, past, data, profiles, onAdd, onEdit, onRemove }: {
+  sessions: Session[];
+  past: Session[];
+  data: Forecast | null;
+  profiles: Profile[];
+  onAdd: () => void;
+  onEdit: (session: Session) => void;
+  onRemove: (id: string) => void;
+}) {
+  const notify = readStorage(NOTIFY_STATE_KEY);
+  return (
+    <section className="view-page">
+      <div className="view-heading">
+        <p className="eyebrow">IN THE DIARY</p>
+        <h1>Planned sessions</h1>
+        <p>Each one is watched against the forecast. You are told when it turns, either way.</p>
+      </div>
+
+      {notify === 'denied' && (
+        <p className="notice" role="alert">
+          Notifications are blocked, so these are only checked while you have the app open.
+          Turn them on for WeatherDeck in Android settings to be told when a session changes.
+        </p>
+      )}
+      {notify === 'granted' && sessions.length > 0 && (
+        <p className="notice quiet">Alerts are on. Checked a few times a day, and only worth a buzz when something moves.</p>
+      )}
+
+      <button type="button" className="primary-action" onClick={onAdd}>+ Plan a session</button>
+
+      {sessions.length === 0 && past.length === 0 && (
+        <p className="notice">Nothing planned. Add a date, an activity and — if you know it — the hour you mean to be on the water.</p>
+      )}
+
+      {sessions.map(session => {
+        const profile = profiles.find(entry => entry.key === session.profile);
+        if (!profile) return null;
+        const now = sessionReading(data, session, profile);
+        const state = sessionState(session, now);
+        const reach = coversDate(data, session.date);
+        const agreement = agreementOn(data, session.date);
+        const moved = (was: number | null, is: number | null, digits: number, unit: string) =>
+          (was === null || is === null || Math.abs(was - is) < (digits ? 0.05 : 0.5)
+            ? null
+            : `${unit} ${was.toFixed(digits)} → ${is.toFixed(digits)}`);
+        return (
+          <article className={`session-row ${reach ? state : 'far'}`} key={session.id}>
+            <button type="button" className="session-body" onClick={() => onEdit(session)}>
+              <p className="plan-head">
+                {session.label.toUpperCase()} · {dayLabel(session.date).dow} {dayLabel(session.date).date}
+                {session.time ? ` · ${session.time}` : ''}
+              </p>
+              {reach ? (
+                <>
+                  <strong>
+                    {stateHeadline(session, now, state).lead}
+                    {stateHeadline(session, now, state).aside && (
+                      <span> · {stateHeadline(session, now, state).aside}</span>
+                    )}
+                  </strong>
+                  <small>
+                    {clauses(
+                      session.time ? `at ${session.time}` : null,
+                      (session.time ? now.waveAtHour : now.wave) === null
+                        ? null : `sea ${(session.time ? now.waveAtHour : now.wave)!.toFixed(1)} m`,
+                      (session.time ? now.windAtHour : now.wind) === null
+                        ? null : `${(session.time ? now.windAtHour : now.wind)!.toFixed(0)} kt`,
+                    ) || 'no readings yet'}
+                  </small>
+                  {state === 'off' && (() => {
+                    // The named hour's own reason first: when the day around it is
+                    // fine, the day-level answer would be blank and the card would
+                    // look simply wrong.
+                    const why = session.time
+                      ? hourReason(data, session.date, session.time, profile.limits)
+                      : bindingReason(data, session.date, profile);
+                    return why ? <small className="plan-why">{session.time ? why : `held back by ${why}`}</small> : null;
+                  })()}
+                  {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind')) && (
+                    <small className="plan-change">
+                      since {dayLabel(localDateOf(session.setAt)).dow}:{' '}
+                      {clauses(moved(session.wave, now.wave, 1, 'sea'), moved(session.wind, now.wind, 0, 'wind'))}
+                    </small>
+                  )}
+                  {agreement.split && (
+                    <small className="plan-split">
+                      models split on {clauses(
+                        agreement.wave !== null && agreement.wave >= SPLIT_WAVE_M ? `sea by ${agreement.wave.toFixed(1)} m` : null,
+                        agreement.wind !== null && agreement.wind >= SPLIT_WIND_KT ? `wind by ${agreement.wind.toFixed(0)} kt` : null,
+                      )} — look again nearer the day
+                    </small>
+                  )}
+                </>
+              ) : (
+                <>
+                  <strong>Waiting for a forecast</strong>
+                  <small>
+                    No model reaches this day yet — they run about two weeks out. You will be told
+                    as soon as the first one does, and daily after that.
+                  </small>
+                </>
+              )}
+            </button>
+            <button type="button" className="remove-button" onClick={() => onRemove(session.id)} aria-label={`Remove ${session.label} on ${session.date}`}>×</button>
+          </article>
+        );
+      })}
+
+      {past.length > 0 && (
+        <>
+          <p className="eyebrow past-heading">BEEN AND GONE</p>
+          {past.map(session => (
+            <article className="session-row past" key={session.id}>
+              <div className="session-body">
+                <p className="plan-head">
+                  {session.label.toUpperCase()} · {dayLabel(session.date).dow} {dayLabel(session.date).date}
+                  {session.time ? ` · ${session.time}` : ''}
+                </p>
+                <small>No longer watched.</small>
+              </div>
+              <button type="button" className="remove-button" onClick={() => onRemove(session.id)} aria-label={`Remove ${session.label} on ${session.date}`}>×</button>
+            </article>
+          ))}
+        </>
+      )}
     </section>
   );
 }
