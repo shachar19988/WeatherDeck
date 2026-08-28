@@ -50,6 +50,11 @@ final class PlanWatch {
     /** Per session, so one trip going quiet cannot mask another one turning. */
     private static final String LAST_HOURS_PREFIX = "lastHours:";
     static final String KEY_NOTIFY_STATE = "notifyState";
+    /** The day the last summary went out, so it goes out once and not per wake-up. */
+    private static final String KEY_DIGEST_DAY = "digestDay";
+    private static final int DIGEST_ID = 4200;
+    private static final int DIGEST_FROM_HOUR = 7;
+    private static final int DIGEST_UNTIL_HOUR = 22;
 
     private PlanWatch() {
     }
@@ -65,45 +70,106 @@ final class PlanWatch {
             double latitude = readDouble(prefs, WidgetData.KEY_LAT, 32.794);
             double longitude = readDouble(prefs, WidgetData.KEY_LON, 34.9896);
             String today = today();
+            java.util.List<String> summary = new java.util.ArrayList<>();
             for (int i = 0; i < sessions.length(); i++) {
                 JSONObject session = sessions.optJSONObject(i);
-                if (session != null) checkOne(context, prefs, session, latitude, longitude, today);
+                if (session == null) continue;
+                String line = checkOne(context, prefs, session, latitude, longitude, today);
+                if (line != null) summary.add(line);
             }
+            postDigest(context, prefs, summary, today);
         } catch (JSONException malformed) {
             Log.w(TAG, "Session list unreadable", malformed);
         }
     }
 
-    private static void checkOne(Context context, SharedPreferences prefs, JSONObject session,
+    /**
+     * One summary a day covering everything in the diary, whether it moved or
+     * not. The per-session alerts above only fire on a change, which is the
+     * right behaviour for interruptions but leaves you with no way to ask "so
+     * what does next week look like" without opening the app.
+     *
+     * Guarded by the date rather than by a timer: the check runs on the widget's
+     * refresh and on a twice-daily alarm, and neither is a schedule.
+     */
+    private static void postDigest(Context context, SharedPreferences prefs,
+            java.util.List<String> lines, String today) {
+        if (lines.isEmpty() || today.equals(prefs.getString(KEY_DIGEST_DAY, ""))) return;
+        // The check runs whenever the widget or the alarm wakes it, which can be
+        // three in the morning. A summary is not urgent enough to be worth being
+        // woken for, so it waits for a civil hour and goes out on the next pass.
+        int hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+        if (hour < DIGEST_FROM_HOUR || hour >= DIGEST_UNTIL_HOUR) return;
+        prefs.edit().putString(KEY_DIGEST_DAY, today).apply();
+
+        String title = lines.size() == 1 ? "1 session ahead" : lines.size() + " sessions ahead";
+        notify(context, DIGEST_ID, title, String.join("\n", lines));
+    }
+
+    /** Returns this session's line for the daily summary, or null to leave it out. */
+    private static String checkOne(Context context, SharedPreferences prefs, JSONObject session,
             double latitude, double longitude, String today) {
         String date = session.optString("date", "");
         String id = session.optString("id", date);
         JSONObject limits = session.optJSONObject("limits");
-        if (date.isEmpty() || id.isEmpty() || limits == null) return;
-        if (date.compareTo(today) < 0) return; // The day has been and gone.
+        if (date.isEmpty() || id.isEmpty() || limits == null) return null;
+        if (date.compareTo(today) < 0) return null; // The day has been and gone.
 
+        String label = session.optString("label", "Session");
+        String when = readableDate(date);
         String key = LAST_HOURS_PREFIX + id;
         try {
             String time = session.isNull("time") ? null : session.optString("time", null);
-            int hours = suitableHours(latitude, longitude, date, limits, time);
+            Integer hours = suitableHours(latitude, longitude, date, limits, time);
+
+            if (hours == null) {
+                // No model reaches this day yet. Distinct from "nothing suits",
+                // and the difference is the whole point of the announcement below.
+                return label + " " + when + " · no forecast yet";
+            }
+
             if (!prefs.contains(key)) {
-                // First look at this session. The count the interface showed also
-                // applies the offshore rule, which this cannot, so starting from
-                // that number would report a change that never happened. Adopt
-                // this count as the baseline instead and stay quiet.
                 prefs.edit().putInt(key, hours).apply();
-                return;
+                /*
+                 * The first forecast for a day booked beyond the models' reach is
+                 * news in its own right — it is the moment the plan becomes
+                 * checkable. A session booked inside the range is not: the app
+                 * showed the count as it was saved, so repeating it would be
+                 * noise, and hadForecast is how the two are told apart.
+                 *
+                 * Otherwise this stays quiet on purpose. The count the interface
+                 * showed also applies the offshore rule, which this cannot, so
+                 * treating it as a baseline would report a change that never was.
+                 */
+                if (!session.optBoolean("hadForecast", true)) {
+                    notify(context, notificationId(id),
+                            "First forecast for " + label + " " + when,
+                            describe(hours, time) + ". Open WeatherDeck for the detail.");
+                }
+                return summaryLine(label, when, hours, time);
             }
 
             int lastTold = prefs.getInt(key, hours);
             boolean gone = hours == 0 && lastTold > 0;
-            if (!gone && Math.abs(hours - lastTold) < MEANINGFUL_CHANGE) return;
-
-            prefs.edit().putInt(key, hours).apply();
-            notifyChange(context, session.optString("label", "Session"), date, time, id, hours, lastTold);
+            if (gone || Math.abs(hours - lastTold) >= MEANINGFUL_CHANGE) {
+                prefs.edit().putInt(key, hours).apply();
+                notifyChange(context, label, date, time, id, hours, lastTold);
+            }
+            return summaryLine(label, when, hours, time);
         } catch (JSONException | IOException failure) {
             Log.w(TAG, "Session check failed", failure);
+            return null;
         }
+    }
+
+    private static String summaryLine(String label, String when, int hours, String time) {
+        return label + " " + when + " · " + describe(hours, time);
+    }
+
+    /** With an hour named the count is 1 or 0, so it reads as a verdict, not a tally. */
+    private static String describe(int hours, String time) {
+        if (time != null) return hours > 0 ? time + " suits" : time + " does not suit";
+        return hours == 0 ? "nothing suits" : hours + " h suitable";
     }
 
     static boolean isWatching(Context context) {
@@ -183,15 +249,26 @@ final class PlanWatch {
      * for that hour alone, since seven good hours are no comfort if none of them
      * is the one you are on the water.
      */
-    private static int suitableHours(double latitude, double longitude, String date, JSONObject limits, String time)
+    private static Integer suitableHours(double latitude, double longitude, String date, JSONObject limits, String time)
             throws IOException, JSONException {
-        JSONObject air = WidgetData.fetch("https://api.open-meteo.com/v1/forecast"
-                + "?latitude=" + latitude + "&longitude=" + longitude
-                + "&hourly=wind_speed_10m,wind_gusts_10m,is_day"
-                + "&start_date=" + date + "&end_date=" + date
-                + "&timezone=auto&wind_speed_unit=kn");
+        JSONObject air;
+        try {
+            air = WidgetData.fetch("https://api.open-meteo.com/v1/forecast"
+                    + "?latitude=" + latitude + "&longitude=" + longitude
+                    + "&hourly=wind_speed_10m,wind_gusts_10m,is_day"
+                    + "&start_date=" + date + "&end_date=" + date
+                    + "&timezone=auto&wind_speed_unit=kn");
+        } catch (IOException unreachable) {
+            /*
+             * A date past the models' reach is refused outright, and so is a
+             * network that is simply down. Both mean the same thing here — no
+             * answer — and neither may be recorded as a baseline, or the day
+             * would come into range with nothing to announce.
+             */
+            return null;
+        }
         JSONObject airHourly = air.optJSONObject("hourly");
-        if (airHourly == null) return 0;
+        if (airHourly == null) return null;
 
         JSONArray wave = null;
         JSONArray swell = null;
@@ -303,8 +380,14 @@ final class PlanWatch {
         return true;
     }
 
-    private static void notifyChange(Context context, String label, String date, String time,
-            String id, int hours, int baseline) {
+    private static int notificationId(String id) {
+        // One per session, so a second trip turning cannot silently replace the
+        // first one's alert. Offset past the digest's own id.
+        return NOTIFICATION_ID + Math.abs(id.hashCode() % 1000);
+    }
+
+    /** Every notification this class posts goes through here. */
+    private static void notify(Context context, int id, String title, String body) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         if (manager == null) return;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
@@ -314,6 +397,24 @@ final class PlanWatch {
         }
         manager.createNotificationChannel(new NotificationChannel(
                 CHANNEL, "Planned days", NotificationManager.IMPORTANCE_DEFAULT));
+
+        Intent open = new Intent(context, MainActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        manager.notify(id, new Notification.Builder(context, CHANNEL)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle(title)
+                .setContentText(body)
+                // Several sessions will not fit on one line, and the summary is
+                // worthless if it is the first one plus an ellipsis.
+                .setStyle(new Notification.BigTextStyle().bigText(body))
+                .setAutoCancel(true)
+                .setContentIntent(PendingIntent.getActivity(context, id, open,
+                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
+                .build());
+    }
+
+    private static void notifyChange(Context context, String label, String date, String time,
+            String id, int hours, int baseline) {
 
         // Which way it moved, said outright. A lock screen is read in a glance
         // and "5 h, was 7" makes you do the subtraction yourself.
@@ -328,19 +429,6 @@ final class PlanWatch {
             headline = (hours < baseline ? when + " is getting worse" : when + " is improving")
                     + " — " + hours + " h, was " + baseline;
         }
-        Intent open = new Intent(context, MainActivity.class)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-
-        Notification notification = new Notification.Builder(context, CHANNEL)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setContentTitle(headline)
-                .setContentText("Open WeatherDeck for the full picture.")
-                .setAutoCancel(true)
-                .setContentIntent(PendingIntent.getActivity(context, Math.abs(id.hashCode() % 1000), open,
-                        PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE))
-                .build();
-        // One notification per session, so a second trip turning cannot silently
-        // replace the first one's alert.
-        manager.notify(NOTIFICATION_ID + Math.abs(id.hashCode() % 1000), notification);
+        notify(context, notificationId(id), headline, "Open WeatherDeck for the full picture.");
     }
 }

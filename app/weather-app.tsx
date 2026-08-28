@@ -641,6 +641,15 @@ type Session = {
   hours: number;
   wind: number | null;
   wave: number | null;
+  /**
+   * Whether any forecast reached this date when it was saved.
+   *
+   * A day booked months out has nothing to say yet. The watcher uses this to
+   * tell "we have never had a forecast for this" from "we have one and it is
+   * poor", so it can announce the first forecast when the day finally comes
+   * into range instead of quietly starting to track it.
+   */
+  hadForecast: boolean;
 };
 
 /** Open-Meteo timestamps are "2026-09-04T09:00" in the location's own clock. */
@@ -662,8 +671,9 @@ function indexAtHour(data: Forecast | null, date: string, time: string | null) {
  */
 function stamped(session: Session, profiles: Profile[]): Session {
   const profile = profiles.find(entry => entry.key === session.profile);
-  if (!profile) return session;
-  return { ...session, label: profile.label, limits: profile.limits };
+  const known = session.hadForecast ?? true;
+  if (!profile) return { ...session, hadForecast: known };
+  return { ...session, label: profile.label, limits: profile.limits, hadForecast: known };
 }
 
 /**
@@ -714,6 +724,7 @@ function readSessions(profiles: Profile[]): Session[] {
       hours: old.hours ?? 0,
       wind: old.wind ?? null,
       wave: old.wave ?? null,
+      hadForecast: true,
     }];
     // Written out straight away rather than left in memory: the Android watcher
     // reads storage, so a migration that never lands there is a trip that
@@ -1742,6 +1753,7 @@ export default function WeatherApp() {
       hours: now.hours,
       wind: now.wind,
       wave: now.wave,
+      hadForecast: coversDate(tableData, draft.date),
     };
     keepSessions([...sessions.filter(item => item.id !== entry.id), entry]);
     setPlanOpen(false);
@@ -2162,7 +2174,7 @@ export default function WeatherApp() {
                       preview.wave === null ? null : `sea ${preview.wave.toFixed(1)} m`,
                       preview.wind === null ? null : `${preview.wind.toFixed(0)} kt`,
                     )
-                    : 'Beyond the forecast range for now — it will start reporting as the day comes into range.'}
+                    : 'No forecast reaches this day yet. Save it anyway — you will be told when the first one arrives.'}
                 </p>
               );
             })()}
@@ -2885,8 +2897,11 @@ function PlansView({ sessions, past, data, profiles, onAdd, onEdit, onRemove }: 
                 </>
               ) : (
                 <>
-                  <strong>Out of range</strong>
-                  <small>No forecast reaches this day yet. It starts reporting as the day comes closer.</small>
+                  <strong>Waiting for a forecast</strong>
+                  <small>
+                    No model reaches this day yet — they run about two weeks out. You will be told
+                    as soon as the first one does, and daily after that.
+                  </small>
                 </>
               )}
             </button>
